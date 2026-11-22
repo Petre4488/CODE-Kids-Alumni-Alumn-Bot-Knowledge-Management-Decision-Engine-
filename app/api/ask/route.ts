@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { AzureOpenAI } from 'openai';
 import { createClient } from '@supabase/supabase-js';
 import { ALUMNI_PM_SYSTEM_PROMPT } from '../../lib/system-prompt';
+import { buildLiveCrmContext } from '../../lib/live-crm-context';
+
 import {
   ThinkingMode,
   resolveModelConfig,
@@ -122,7 +124,7 @@ export async function POST(req: NextRequest) {
     const queryEmbedding = embRes.data[0].embedding;
 
     // 2. Hybrid search în documente + Notes
-    const [docsRes, notesRes] = await Promise.all([
+    const [docsRes, notesRes, liveCrmContext] = await Promise.all([
       supabase.rpc('match_documents', {
         query_embedding: queryEmbedding,
         query_text: question,
@@ -133,6 +135,7 @@ export async function POST(req: NextRequest) {
         query_embedding: queryEmbedding,
         match_count: 3,
       }),
+      buildLiveCrmContext(department),
     ]);
 
     if (docsRes.error) {
@@ -204,20 +207,20 @@ const escalationGuardInstruction =
         ? `\n\n[AUTO-ESCALATION]: Dacă observi ORICE neconcordanță, contradicție, diferență de cifre/termene între documente, date incomplete sau dacă trebuie să sintetizezi roluri/structuri complexe, nu răspunde tu — returnează DOAR cuvântul exact: [ESCALATE]`
         : '';
 
-    const baseMessages = [
-      {
-        role: 'system' as const,
-        content:
-          ALUMNI_PM_SYSTEM_PROMPT +
-          modelConfig.thinkingPromptInjection +
-          escalationGuardInstruction,
-      },
-      ...history.map((m) => ({ role: m.role, content: m.content })),
-      {
-        role: 'user' as const,
-        content: `CONTEXT DOCUMENTE:\n${docContext}${notesContext}${webContext}\n\nÎNTREBARE UTILIZATOR (${usedWeb ? 'CU /web ACTIVAT' : 'FĂRĂ /web'}): ${question}`,
-      },
-    ];
+   const baseMessages = [
+        {
+          role: 'system' as const,
+          content:
+            ALUMNI_PM_SYSTEM_PROMPT +
+            modelConfig.thinkingPromptInjection +
+            escalationGuardInstruction,
+        },
+        ...history.map((m) => ({ role: m.role, content: m.content })),
+        {
+          role: 'user' as const,
+          content: `CONTEXT DOCUMENTE:\n${docContext}${notesContext}${liveCrmContext}${webContext}\n\nÎNTREBARE UTILIZATOR (${usedWeb ? 'CU /web ACTIVAT' : 'FĂRĂ /web'}): ${question}`,
+        },
+      ];
 
     let completion = await azure.chat.completions.create({
       model: modelConfig.deployment,

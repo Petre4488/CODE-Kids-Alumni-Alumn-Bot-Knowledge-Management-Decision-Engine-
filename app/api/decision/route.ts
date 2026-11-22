@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { AzureOpenAI } from 'openai';
 import { createClient } from '@supabase/supabase-js';
 import { ALUMNI_PM_SYSTEM_PROMPT } from '../../lib/system-prompt';
+import { buildLiveCrmContext } from '../../lib/live-crm-context';
 import {
   ThinkingMode,
   resolveModelConfig,
@@ -289,6 +290,7 @@ Menționează clar că decizia finală îi aparține lui Petre.`;
           .join('\n\n')
       : '';
 
+    const liveCrmContext = await buildLiveCrmContext(department);
     const completion = await azure.chat.completions.create({
       model: modelConfig.deployment,
       ...(modelConfig.reasoningEffort ? { reasoning_effort: modelConfig.reasoningEffort } : {}),
