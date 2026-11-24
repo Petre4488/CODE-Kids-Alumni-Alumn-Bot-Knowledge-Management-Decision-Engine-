@@ -11,6 +11,7 @@ import {
   ResourceItem,
   TaskItem,
 } from './pmp-types';
+import { fetchOutlookEvents } from './outlook-graph';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -211,12 +212,13 @@ export async function buildLiveCrmContext(filterDepartment?: string | null): Pro
       ? filteredProjects
           .map((p) => {
             const owner = p.owner_id ? personMap.get(p.owner_id) || 'Nealocat' : 'Nealocat';
+            const coreTag = p.is_core_team ? '[CORE TEAM - PETRE] ' : '[ALUMNI DEPT] ';
             const pNotes = projectNotes
               .filter((n) => n.project_id === p.id)
               .slice(0, 2)
               .map((n) => `[${n.created_at.slice(0, 10)}] ${n.content}`)
               .join(' ; ');
-            return `- [${p.department}] ${p.title} | Status: ${p.status} | Progres: ${p.progress}% | Coordonator: ${owner} | Perioadă: ${p.start_date || '?'} -> ${p.deadline || '?'}${
+            return `- ${coreTag}[${p.department}] ${p.title} | Status: ${p.status} | Progres: ${p.progress}% | Coordonator: ${owner} | Perioadă: ${p.start_date || '?'} -> ${p.deadline || '?'}${
               pNotes ? ` | Ultimele update-uri: ${pNotes}` : ''
             }`;
           })
@@ -259,6 +261,21 @@ export async function buildLiveCrmContext(filterDepartment?: string | null): Pro
       ? postItNotes.map((pi) => `- ${pi.content}`).join('\n')
       : '';
 
+    const in14DaysStr = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+    const outlookEvents = await fetchOutlookEvents(todayStr, in14DaysStr);
+    const nonTaskOutlook = outlookEvents.filter((e) => !e.isAppSyncedTask);
+
+    const outlookBlock = nonTaskOutlook.length
+      ? nonTaskOutlook
+          .map(
+            (e) =>
+              `- ${e.start} -> ${e.end} | ${e.subject}${
+                e.location ? ` (${e.location})` : ''
+              }`
+          )
+          .join('\n')
+      : 'Niciun eveniment extern în Outlook în următoarele 14 zile (sau Outlook neconectat).';
+
     return `
 
 === LIVE CRM & PMP DATABASE (DATA CURENTĂ: ${todayStr}) ===
@@ -276,7 +293,10 @@ ${tasksBlock}
 --- BAZA DE DATE OAMENI (ALUMNI & BOARD) ---
 ${peopleBlock}${notesBlock ? `\n\n--- NOTIȚE GENERALE (MEMORIE AI) ---\n${notesBlock}` : ''}${
       postItsBlock ? `\n\n--- POST-IT RAPIDE PETRE ---\n${postItsBlock}` : ''
-    }`;
+    }
+
+--- OUTLOOK CALENDAR LIVE (URMĂTOARELE 14 ZILE - FUS ORAR BUCUREȘTI) ---
+${outlookBlock}`;
   } catch (err) {
     console.error('buildLiveCrmContext error:', err);
     return '';

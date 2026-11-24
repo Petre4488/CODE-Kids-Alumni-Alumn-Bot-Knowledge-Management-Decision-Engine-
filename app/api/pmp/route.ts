@@ -190,10 +190,6 @@ async function upsertPeopleRecords(
   return { inserted: toInsert.length, updated };
 }
 
-/**
- * Calculează automat progresul % al proiectului din durata/deadline-urile
- * task-urilor, subtask-urilor și milestone-urilor aprobate.
- */
 async function recalculateProjectProgress(projectId: string | null | undefined) {
   if (!projectId) return;
 
@@ -448,7 +444,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 1C. ACTUALIZARE ROL IERARHIC PERSOANĂ
+    // 1C. ACTUALIZARE ROL IERARHIC & ASIGURARE PERSOANĂ CORE (PETRE / VLAD)
     if (action === 'update_person_role') {
       const { error } = await supabase
         .from('people')
@@ -456,6 +452,34 @@ export async function POST(req: NextRequest) {
         .eq('id', body.id);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       return NextResponse.json({ ok: true });
+    }
+
+    if (action === 'ensure_core_person') {
+      const targetName = String(body.full_name || '').trim();
+      const targetRole = String(body.role || 'Manager').trim();
+      const { data: existingList } = await supabase
+        .from('people')
+        .select('*')
+        .ilike('full_name', `%${targetName}%`)
+        .limit(1);
+
+      if (existingList && existingList.length > 0) {
+        return NextResponse.json({ ok: true, person: existingList[0] });
+      }
+
+      const { data: created, error } = await supabase
+        .from('people')
+        .insert({
+          full_name: targetName,
+          role: targetRole,
+          department: 'Board',
+          availability: 'Disponibil',
+        })
+        .select('*')
+        .single();
+
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true, person: created });
     }
 
     // 2. CREARE / ACTUALIZARE / ȘTERGERE PROIECT
@@ -467,6 +491,9 @@ export async function POST(req: NextRequest) {
         owner_id: body.owner_id || null,
         status: body.status || 'active',
         progress: Number(body.progress || 0),
+        is_core_team: Boolean(body.is_core_team),
+        needs_pm_sync: Boolean(body.needs_pm_sync),
+        blocked_by_project_id: body.blocked_by_project_id || null,
         start_date: body.start_date || null,
         deadline: body.deadline || null,
       });
@@ -483,6 +510,11 @@ export async function POST(req: NextRequest) {
       if (body.department !== undefined) updates.department = normalizeDepartment(body.department);
       if (body.owner_id !== undefined) updates.owner_id = body.owner_id || null;
       if (body.status !== undefined) updates.status = body.status;
+      if (body.is_core_team !== undefined) updates.is_core_team = Boolean(body.is_core_team);
+      if (body.needs_pm_sync !== undefined) updates.needs_pm_sync = Boolean(body.needs_pm_sync);
+      if (body.blocked_by_project_id !== undefined) {
+        updates.blocked_by_project_id = body.blocked_by_project_id || null;
+      }
       if (body.progress !== undefined) {
         updates.progress = Math.min(100, Math.max(0, Number(body.progress)));
       }
@@ -515,6 +547,7 @@ export async function POST(req: NextRequest) {
           estimated_hours: Number(body.estimated_hours ?? 2),
           blocked_by_id: body.blocked_by_id || null,
           is_my_task: Boolean(body.is_my_task),
+          needs_pm_sync: Boolean(body.needs_pm_sync),
           assignee_id: body.assignee_id || null,
           department: normalizeDepartment(body.department),
           start_date: body.start_date || null,
@@ -558,6 +591,7 @@ export async function POST(req: NextRequest) {
       if (body.start_date !== undefined) updates.start_date = body.start_date || null;
       if (body.deadline !== undefined) updates.deadline = body.deadline || null;
       if (body.is_my_task !== undefined) updates.is_my_task = Boolean(body.is_my_task);
+      if (body.needs_pm_sync !== undefined) updates.needs_pm_sync = Boolean(body.needs_pm_sync);
 
       const { data: updated, error } = await supabase
         .from('tasks')
@@ -634,7 +668,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    // 5. NOTIȚE PER PROIECT & NOTIȚE GENERALE
+    // 5. NOTIȚE PER PROIECT & NOTIȚE GENERALE (CREARE + EDITARE + ȘTERGERE)
     if (action === 'create_project_note') {
       const { error } = await supabase.from('project_notes').insert({
         project_id: body.project_id,
@@ -651,14 +685,52 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
+    if (action === 'update_project_note') {
+      const updates: Record<string, unknown> = {
+        content: String(body.content || '').trim(),
+      };
+      if (body.project_id !== undefined) updates.project_id = body.project_id;
+      const { error } = await supabase
+        .from('project_notes')
+        .update(updates)
+        .eq('id', body.id);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (action === 'delete_project_note') {
+      const { error } = await supabase.from('project_notes').delete().eq('id', body.id);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
+    }
+
     if (action === 'create_general_note') {
       const { error } = await supabase.from('general_notes').insert({
         title: String(body.title || 'Notiță').trim(),
-        category: String(body.category || 'General').trim(),
+        category: String(body.category || 'Ședință').trim(),
         tags: Array.isArray(body.tags) ? body.tags : [],
         content: String(body.content || '').trim(),
         is_ai_memory: Boolean(body.is_ai_memory),
       });
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (action === 'update_general_note') {
+      const { error } = await supabase
+        .from('general_notes')
+        .update({
+          title: String(body.title || 'Notiță').trim(),
+          category: String(body.category || 'Ședință').trim(),
+          content: String(body.content || '').trim(),
+        })
+        .eq('id', body.id);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (action === 'delete_general_note') {
+      const { error } = await supabase.from('general_notes').delete().eq('id', body.id);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       return NextResponse.json({ ok: true });
     }
@@ -673,13 +745,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    // 6. POST-IT NOTES (DASHBOARD + HUB NOTIȚE)
+    // 6. POST-IT NOTES (CREARE + EDITARE + ȘTERGERE)
     if (action === 'create_post_it') {
       const { error } = await supabase.from('post_it_notes').insert({
         content: String(body.content || '').trim(),
         color: body.color || 'amber',
         is_pinned: true,
       });
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (action === 'update_post_it') {
+      const updates: Record<string, unknown> = {
+        content: String(body.content || '').trim(),
+      };
+      if (body.color) updates.color = body.color;
+      const { error } = await supabase
+        .from('post_it_notes')
+        .update(updates)
+        .eq('id', body.id);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       return NextResponse.json({ ok: true });
     }

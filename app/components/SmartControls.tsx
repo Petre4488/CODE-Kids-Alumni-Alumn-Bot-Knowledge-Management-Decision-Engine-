@@ -4,13 +4,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEPARTMENTS, Person, TaskItem } from '../lib/pmp-types';
 
 /* =========================================================================
-   1. SEARCHABLE ALUMNI PICKER (CU LOAD INDICATOR)
+   1. SEARCHABLE ALUMNI PICKER (CU PETRE & VLAD PINNED SUS + LOAD INDICATOR)
    ========================================================================= */
 interface AlumniSearchPickerProps {
   people: Person[];
   tasks?: TaskItem[];
   value: string | null;
   onChange: (personId: string | null) => void;
+  onPersonCreated?: () => Promise<void>;
   placeholder?: string;
 }
 
@@ -19,10 +20,12 @@ export function AlumniSearchPicker({
   tasks = [],
   value,
   onChange,
+  onPersonCreated,
   placeholder = 'Caută alumn după nume, rol, departament...',
 }: AlumniSearchPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [creatingCore, setCreatingCore] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -51,6 +54,51 @@ export function AlumniSearchPicker({
     () => people.find((p) => p.id === value) || null,
     [people, value]
   );
+
+  const petreRecord = useMemo(
+    () => people.find((p) => p.full_name.toLowerCase().includes('petre')) || null,
+    [people]
+  );
+
+  const vladRecord = useMemo(
+    () => people.find((p) => p.full_name.toLowerCase().includes('vlad')) || null,
+    [people]
+  );
+
+  async function selectCorePerson(
+    existing: Person | null,
+    fallbackName: string,
+    fallbackRole: string
+  ) {
+    if (existing) {
+      onChange(existing.id);
+      setOpen(false);
+      setQuery('');
+      return;
+    }
+    if (creatingCore) return;
+    setCreatingCore(true);
+    try {
+      const res = await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'ensure_core_person',
+          full_name: fallbackName,
+          role: fallbackRole,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.person?.id) {
+        await onPersonCreated?.();
+        onChange(data.person.id);
+        setOpen(false);
+        setQuery('');
+      }
+    } finally {
+      setCreatingCore(false);
+    }
+  }
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
@@ -102,9 +150,44 @@ export function AlumniSearchPicker({
               placeholder={placeholder}
               className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-emerald-500 focus:outline-none"
             />
+
+            {/* QUICK-SELECT CORE: PETRE & VLAD */}
+            <div className="mt-2 grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                disabled={creatingCore}
+                onClick={() =>
+                  selectCorePerson(petreRecord, 'Cîrceag Petre', 'Manager')
+                }
+                className={`flex items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] font-medium transition ${
+                  petreRecord && value === petreRecord.id
+                    ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-200'
+                    : 'border-zinc-700 bg-zinc-950 text-zinc-200 hover:border-emerald-500/40'
+                }`}
+              >
+                <span>⚡</span>
+                <span>Petre (Eu)</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={creatingCore}
+                onClick={() =>
+                  selectCorePerson(vladRecord, 'Brinzan Vlad', 'Monitorizare')
+                }
+                className={`flex items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] font-medium transition ${
+                  vladRecord && value === vladRecord.id
+                    ? 'border-sky-500/50 bg-sky-500/20 text-sky-200'
+                    : 'border-zinc-700 bg-zinc-950 text-zinc-200 hover:border-sky-500/40'
+                }`}
+              >
+                <span>🛡️</span>
+                <span>Vlad (Monit.)</span>
+              </button>
+            </div>
           </div>
 
-          <div className="max-h-60 overflow-y-auto p-1">
+          <div className="max-h-56 overflow-y-auto p-1">
             <button
               type="button"
               onClick={() => {
@@ -322,7 +405,6 @@ export function CalendarRangePicker({
             openUpward ? 'bottom-full mb-1.5' : 'mt-1.5'
           } ${alignRight ? 'right-0' : 'left-0'}`}
         >
-          {/* Header Lună */}
           <div className="mb-2 flex items-center justify-between">
             <button
               type="button"
@@ -349,14 +431,12 @@ export function CalendarRangePicker({
               : 'Click pe data de start'}
           </p>
 
-          {/* Zilele săptămânii */}
           <div className="mb-1 grid grid-cols-7 text-center text-[10px] font-medium text-zinc-500">
             {WEEKDAYS_RO.map((w) => (
               <div key={w}>{w}</div>
             ))}
           </div>
 
-          {/* Grid Zile */}
           <div className="grid grid-cols-7 gap-0.5 text-center font-mono text-[11px]">
             {calendarCells.map((iso, idx) => {
               if (!iso) return <div key={`empty-${idx}`} />;
@@ -387,7 +467,6 @@ export function CalendarRangePicker({
             })}
           </div>
 
-          {/* Quick Presets */}
           <div className="mt-2.5 flex flex-wrap items-center justify-between gap-1 border-t border-zinc-800 pt-2 text-[10px]">
             <button
               type="button"

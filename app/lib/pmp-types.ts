@@ -151,6 +151,9 @@ export interface Project {
   owner_id: string | null;
   status: 'active' | 'planned' | 'completed' | 'on_hold';
   progress: number;
+  is_core_team: boolean;
+  needs_pm_sync?: boolean;
+  blocked_by_project_id: string | null;
   start_date: string | null;
   deadline: string | null;
   updated_at: string;
@@ -170,6 +173,7 @@ export interface TaskItem {
   outlook_event_id?: string | null;
   is_milestone_approved: boolean;
   is_my_task: boolean;
+  needs_pm_sync?: boolean;
   assignee_id: string | null;
   department: DepartmentKey;
   start_date: string | null;

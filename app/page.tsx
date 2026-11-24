@@ -28,9 +28,27 @@ type MainTab = 'dashboard' | 'workspace' | 'crm' | 'notes' | 'ai';
 type CrmSubTab = 'people' | 'resources' | 'events' | 'partners';
 type NotesFilter = 'all' | 'postit' | 'project' | 'general';
 
+const DEPT_FOLDER_ORDER: DepartmentKey[] = [
+  'Tehnic',
+  'Comunicare',
+  'Comunitati',
+  'Coordonare Judeteana',
+  'Board',
+];
+
 export default function AlumniCommandCenter() {
   const [activeTab, setActiveTab] = useState<MainTab>('dashboard');
   const [navCollapsed, setNavCollapsed] = useState(false);
+
+  // Dia-style Folders state
+  const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({
+    CORE_TEAM: true,
+    Tehnic: true,
+    Board: true,
+  });
+  const [selectedDeptFolder, setSelectedDeptFolder] = useState<DepartmentKey | null>(null);
+  const [selectedProjectNavId, setSelectedProjectNavId] = useState<string | null>(null);
+  const [onlyCoreTeamNav, setOnlyCoreTeamNav] = useState<boolean>(false);
 
   // Date live din Supabase PMP & CRM
   const [people, setPeople] = useState<Person[]>([]);
@@ -70,6 +88,12 @@ export default function AlumniCommandCenter() {
   const [noteCategory, setNoteCategory] = useState('Ședință Board');
   const [noteContent, setNoteContent] = useState('');
   const [noteAiMemory, setNoteAiMemory] = useState(true);
+  const [noteDestination, setNoteDestination] = useState<'general' | 'postit' | 'project'>('general');
+  const [noteTargetProjectId, setNoteTargetProjectId] = useState<string>('');
+  const [editingNoteKey, setEditingNoteKey] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editCategory, setEditCategory] = useState('');
+  const [editContent, setEditContent] = useState('');
   const [extractingNoteId, setExtractingNoteId] = useState<string | null>(null);
   const [noteProposals, setNoteProposals] = useState<Record<string, ExtractedActionProposal[]>>({});
   const [appliedProposalIds, setAppliedProposalIds] = useState<Record<string, boolean>>({});
@@ -113,8 +137,20 @@ export default function AlumniCommandCenter() {
         loadPmpData();
       }
     }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setAiDrawerOpen((prev) => !prev);
+      }
+    }
+
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      window.removeEventListener('keydown', onKeyDown);
+    };
   }, []);
 
   function openOutlookPopup() {
@@ -151,6 +187,22 @@ export default function AlumniCommandCenter() {
     }
   }
 
+  function navigateToDepartmentFolder(dept: DepartmentKey, projectId: string | null = null) {
+    setOnlyCoreTeamNav(false);
+    setSelectedDeptFolder(dept);
+    setSelectedProjectNavId(projectId);
+    setOpenFolders((prev) => ({ ...prev, [dept]: true }));
+    setActiveTab('workspace');
+  }
+
+  function navigateToCoreTeamFolder(projectId: string | null = null) {
+    setSelectedDeptFolder(null);
+    setOnlyCoreTeamNav(true);
+    setSelectedProjectNavId(projectId);
+    setOpenFolders((prev) => ({ ...prev, CORE_TEAM: true }));
+    setActiveTab('workspace');
+  }
+
   function copyPersonSummary(person: Person) {
     const personTasks = tasks.filter(
       (t) => t.assignee_id === person.id && t.status !== 'done'
@@ -181,22 +233,104 @@ export default function AlumniCommandCenter() {
     await loadPmpData();
   }
 
-  async function handleCreateGeneralNote(e: React.FormEvent) {
+  async function handleCreateUnifiedNote(e: React.FormEvent) {
     e.preventDefault();
     if (!noteContent.trim()) return;
+
+    if (noteDestination === 'postit') {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'create_post_it',
+          content: noteContent.trim(),
+          color: 'amber',
+        }),
+      });
+    } else if (noteDestination === 'project' && noteTargetProjectId) {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'create_project_note',
+          project_id: noteTargetProjectId,
+          content: noteContent.trim(),
+          is_ai_memory: noteAiMemory,
+        }),
+      });
+    } else {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'create_general_note',
+          title: noteTitle.trim() || 'Notiță ședință',
+          category: noteCategory,
+          content: noteContent.trim(),
+          is_ai_memory: noteAiMemory,
+        }),
+      });
+    }
+
+    setNoteTitle('');
+    setNoteContent('');
+    await loadPmpData();
+  }
+
+  async function saveEditedNote(
+    kind: 'postit' | 'project' | 'general',
+    id: string
+  ) {
+    if (!editContent.trim()) return;
+    if (kind === 'postit') {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update_post_it',
+          id,
+          content: editContent.trim(),
+        }),
+      });
+    } else if (kind === 'project') {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update_project_note',
+          id,
+          content: editContent.trim(),
+        }),
+      });
+    } else {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update_general_note',
+          id,
+          title: editTitle.trim() || 'Notiță',
+          category: editCategory.trim() || 'Ședință',
+          content: editContent.trim(),
+        }),
+      });
+    }
+    setEditingNoteKey(null);
+    await loadPmpData();
+  }
+
+  async function deleteAnyNote(kind: 'postit' | 'project' | 'general', id: string) {
+    const actionMap = {
+      postit: 'delete_post_it',
+      project: 'delete_project_note',
+      general: 'delete_general_note',
+    } as const;
+
     await fetch('/api/pmp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'create_general_note',
-        title: noteTitle.trim() || 'Notiță operațională',
-        category: noteCategory,
-        content: noteContent.trim(),
-        is_ai_memory: noteAiMemory,
-      }),
+      body: JSON.stringify({ action: actionMap[kind], id }),
     });
-    setNoteTitle('');
-    setNoteContent('');
     await loadPmpData();
   }
 
@@ -282,6 +416,7 @@ export default function AlumniCommandCenter() {
     : null;
 
   const projectMap = new Map(projects.map((p) => [p.id, p]));
+  const coreTeamProjects = projects.filter((p) => p.is_core_team && p.status !== 'completed');
 
   const filteredPeople = people.filter((p) => {
     const matchesDept = !crmDeptFilter || p.department === crmDeptFilter;
@@ -297,29 +432,24 @@ export default function AlumniCommandCenter() {
 
   const totalAllNotes = generalNotes.length + projectNotes.length + postItNotes.length;
 
-  const NAV_ITEMS: { id: MainTab; icon: string; label: string }[] = [
-    { id: 'dashboard', icon: '📊', label: 'Dashboard' },
-    { id: 'workspace', icon: '📐', label: 'Workspace Proiecte' },
-    { id: 'crm', icon: '🗂️', label: 'Bază de Date (CRM)' },
-    { id: 'notes', icon: '📝', label: `Notițe (${totalAllNotes})` },
-    { id: 'ai', icon: '🤖', label: 'Alumn-Bot & Decizii' },
-  ];
-
   return (
-    <div className="flex h-screen overflow-hidden bg-zinc-950 text-zinc-100">
-      {/* LEFT MASTER SIDEBAR */}
+    <div className="flex h-screen gap-2.5 overflow-hidden bg-[#0B0C0E] p-2.5 text-zinc-100">
+      {/* ===================================================================== */}
+      {/* DIA-STYLE FLOATING SIDEBAR (CORE TEAM + DEPARTMENT FOLDERS)           */}
+      {/* ===================================================================== */}
       <aside
-        className={`flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/95 transition-all ${
-          navCollapsed ? 'w-14' : 'w-56'
+        className={`flex shrink-0 flex-col rounded-2xl border border-white/[0.07] bg-[#13151A] shadow-2xl transition-all duration-200 ${
+          navCollapsed ? 'w-14' : 'w-60'
         }`}
       >
-        <div className="flex h-12 items-center justify-between border-b border-zinc-800 px-3">
+        {/* Top Brand + Collapse */}
+        <div className="flex h-12 items-center justify-between px-3.5">
           {!navCollapsed && (
             <div className="flex items-center gap-2">
-              <div className="flex h-6 w-6 items-center justify-center rounded bg-emerald-500/20 font-mono text-xs font-bold text-emerald-400">
+              <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-white/[0.08] font-mono text-[11px] font-bold text-zinc-100">
                 CK
               </div>
-              <span className="text-xs font-semibold tracking-tight text-zinc-100">
+              <span className="text-xs font-semibold tracking-tight text-zinc-200">
                 Alumni Command
               </span>
             </div>
@@ -327,148 +457,350 @@ export default function AlumniCommandCenter() {
           <button
             type="button"
             onClick={() => setNavCollapsed((p) => !p)}
-            className="rounded p-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-            title={navCollapsed ? 'Extinde meniul' : 'Restrânge meniul'}
+            className="rounded-lg p-1.5 text-xs text-zinc-500 transition hover:bg-white/[0.05] hover:text-zinc-200"
+            title={navCollapsed ? 'Extinde sidebar' : 'Restrânge sidebar'}
           >
             {navCollapsed ? '»' : '«'}
           </button>
         </div>
 
-        <nav className="flex-1 space-y-1 p-2">
-          {NAV_ITEMS.map((item) => {
-            const active = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setActiveTab(item.id)}
-                className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium transition ${
-                  active
-                    ? 'border border-emerald-500/30 bg-emerald-500/15 text-emerald-300'
-                    : 'border border-transparent text-zinc-400 hover:bg-zinc-800/70 hover:text-zinc-200'
-                }`}
-              >
-                <span className="text-sm">{item.icon}</span>
-                {!navCollapsed && <span className="truncate">{item.label}</span>}
-              </button>
-            );
-          })}
-        </nav>
-
-        {!navCollapsed && (
-          <div className="border-t border-zinc-800 p-3 text-[11px] text-zinc-500">
-            Single-Operator Mode · Petre
-          </div>
-        )}
-      </aside>
-
-      {/* MAIN CONTENT SHELL */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* TOP HEADER BAR */}
-        <header className="relative flex h-12 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-900/80 px-4">
-          <div className="flex items-center gap-2 text-xs font-semibold text-zinc-200">
-            <span>{NAV_ITEMS.find((n) => n.id === activeTab)?.icon}</span>
-            <span>{NAV_ITEMS.find((n) => n.id === activeTab)?.label}</span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {/* BUTON POPUP OUTLOOK CALENDAR */}
-            {outlookConnected ? (
-              <button
-                type="button"
-                disabled={syncingOutlook}
-                onClick={handleManualOutlookSync}
-                title="Sincronizează task-urile cu Outlook Calendar"
-                className="rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1.5 text-xs font-medium text-sky-300 hover:bg-sky-500/25 disabled:opacity-50"
-              >
-                {syncingOutlook ? '⏳ Sincronizez...' : '📅 Outlook Synced ✓'}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={openOutlookPopup}
-                className="rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1.5 text-xs font-medium text-sky-300 transition hover:bg-sky-500/25"
-              >
-                📅 Conectează Outlook
-              </button>
-            )}
-
+        {/* Dia-style Command / Ask AI Trigger */}
+        {!navCollapsed && activeTab !== 'ai' && (
+          <div className="px-2.5 pb-2">
             <button
               type="button"
-              onClick={() => setExcelModalOpen(true)}
-              className="rounded-lg border border-zinc-700 bg-zinc-800/80 px-2.5 py-1.5 text-xs text-zinc-200 hover:border-emerald-500/50"
+              onClick={() => setAiDrawerOpen(true)}
+              className="flex w-full items-center justify-between rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs text-zinc-400 transition hover:border-white/[0.14] hover:bg-white/[0.05] hover:text-zinc-200"
             >
-              📥 Import Excel / Sheets
+              <span className="flex items-center gap-2">
+                <span className="text-emerald-400">✦</span>
+                <span>Ask Alumn-Bot...</span>
+              </span>
+              <kbd className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
+                ⌘K
+              </kbd>
             </button>
+          </div>
+        )}
 
-            {/* Clopoțel Notificări In-App */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setNotifOpen((p) => !p)}
-                className="relative rounded-lg border border-zinc-700 bg-zinc-800/80 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-700"
-                title="Centru de Notificări"
+        {/* Primary Navigation */}
+        <div className="flex-1 space-y-4 overflow-y-auto px-2 py-1">
+          <nav className="space-y-0.5">
+            {[
+              { id: 'dashboard', icon: '⌂', label: 'Acasă' },
+              { id: 'workspace', icon: '◫', label: 'Toate Proiectele' },
+              { id: 'crm', icon: '◎', label: 'Oameni & CRM' },
+              {
+                id: 'notes',
+                icon: '✎',
+                label: 'Notițe',
+                badge: totalAllNotes > 0 ? totalAllNotes : undefined,
+              },
+              { id: 'ai', icon: '✦', label: 'Alumn-Bot' },
+            ].map((item) => {
+              const isAllWorkspace =
+                item.id === 'workspace' &&
+                activeTab === 'workspace' &&
+                !selectedDeptFolder &&
+                !onlyCoreTeamNav;
+              const isActive =
+                item.id === 'workspace' ? isAllWorkspace : activeTab === item.id;
+
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    if (item.id === 'workspace') {
+                      setSelectedDeptFolder(null);
+                      setSelectedProjectNavId(null);
+                      setOnlyCoreTeamNav(false);
+                    }
+                    setActiveTab(item.id as MainTab);
+                  }}
+                  className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
+                    isActive
+                      ? 'bg-white/[0.09] text-white'
+                      : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200'
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5 truncate">
+                    <span className="w-4 text-center text-sm opacity-80">{item.icon}</span>
+                    {!navCollapsed && <span className="truncate">{item.label}</span>}
+                  </span>
+                  {!navCollapsed && item.badge !== undefined && (
+                    <span className="font-mono text-[10px] text-zinc-500">{item.badge}</span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* FOLDER DEDICAT CORE TEAM */}
+          {!navCollapsed && (
+            <div className="space-y-1">
+              <div
+                className={`flex items-center justify-between rounded-xl px-2 py-1.5 text-xs transition ${
+                  activeTab === 'workspace' && onlyCoreTeamNav && !selectedProjectNavId
+                    ? 'bg-amber-500/15 font-medium text-amber-200'
+                    : 'text-amber-300/80 hover:bg-white/[0.04] hover:text-amber-200'
+                }`}
               >
-                🔔
-                {notifications.length > 0 && (
-                  <span className="ml-1 rounded-full bg-rose-500 px-1.5 py-0.2 font-mono text-[10px] font-bold text-white">
-                    {notifications.length}
+                <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOpenFolders((prev) => ({
+                        ...prev,
+                        CORE_TEAM: !prev.CORE_TEAM,
+                      }))
+                    }
+                    className="rounded p-0.5 text-[10px] opacity-70 hover:opacity-100"
+                  >
+                    {openFolders.CORE_TEAM ? '▾' : '▸'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigateToCoreTeamFolder(null)}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  >
+                    <span>✦</span>
+                    <span className="truncate">Core Team</span>
+                  </button>
+                </div>
+                {coreTeamProjects.length > 0 && (
+                  <span className="font-mono text-[10px] text-amber-300/60">
+                    {coreTeamProjects.length}
                   </span>
                 )}
-              </button>
+              </div>
 
-              {notifOpen && (
-                <div className="absolute right-0 z-40 mt-2 w-80 rounded-xl border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
-                  <div className="mb-2 flex items-center justify-between border-b border-zinc-800 pb-1.5">
-                    <span className="text-xs font-semibold text-zinc-200">
-                      Notificări Operaționale ({notifications.length})
-                    </span>
+              {openFolders.CORE_TEAM && coreTeamProjects.length > 0 && (
+                <div className="ml-4 space-y-0.5 border-l border-amber-500/20 pl-2.5">
+                  {coreTeamProjects.map((proj) => (
                     <button
+                      key={`core-${proj.id}`}
                       type="button"
-                      onClick={() => setNotifOpen(false)}
-                      className="text-xs text-zinc-400"
+                      onClick={() => navigateToCoreTeamFolder(proj.id)}
+                      className={`flex w-full items-center justify-between gap-1.5 rounded-lg px-2 py-1 text-left text-[11px] transition ${
+                        activeTab === 'workspace' && selectedProjectNavId === proj.id
+                          ? 'bg-amber-500/15 font-medium text-amber-200'
+                          : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-200'
+                      }`}
                     >
-                      ✕
+                      <span className="truncate">{proj.title}</span>
+                      <span className="shrink-0 font-mono text-[10px] text-zinc-600">
+                        {proj.progress}%
+                      </span>
                     </button>
-                  </div>
-                  <div className="max-h-72 space-y-1.5 overflow-y-auto">
-                    {notifications.length === 0 ? (
-                      <p className="py-4 text-center text-xs text-zinc-500">
-                        Nicio alertă activă.
-                      </p>
-                    ) : (
-                      notifications.map((n) => (
-                        <div
-                          key={n.id}
-                          className="rounded-lg border border-zinc-800 bg-zinc-950 p-2 text-xs"
-                        >
-                          <p className="font-medium text-zinc-200">{n.title}</p>
-                          <p className="mt-0.5 text-[11px] text-zinc-400">{n.detail}</p>
-                        </div>
-                      ))
-                    )}
-                  </div>
+                  ))}
                 </div>
               )}
             </div>
+          )}
 
-            {activeTab !== 'ai' && (
-              <button
-                type="button"
-                onClick={() => setAiDrawerOpen((p) => !p)}
-                className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                  aiDrawerOpen
-                    ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
-                    : 'border-emerald-500/40 bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30'
-                }`}
-              >
-                🤖 Ask AI
-              </button>
-            )}
-          </div>
-        </header>
+          {/* FOLDERE PE DEPARTAMENTE (AUTO-SINCRONIZATE DIN SUPABASE) */}
+          {!navCollapsed && (
+            <div className="space-y-1 pt-1">
+              <div className="px-2.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+                Departamente
+              </div>
 
-        {/* TAB CONTENT */}
+              <div className="space-y-0.5">
+                {DEPT_FOLDER_ORDER.map((deptKey) => {
+                  const meta = DEPARTMENTS[deptKey];
+                  const deptProjects = projects.filter(
+                    (p) => p.department === deptKey && p.status !== 'completed'
+                  );
+                  const isFolderOpen = Boolean(openFolders[deptKey]);
+                  const isDeptSelected =
+                    activeTab === 'workspace' &&
+                    selectedDeptFolder === deptKey &&
+                    !selectedProjectNavId;
+
+                  return (
+                    <div key={deptKey}>
+                      <div
+                        className={`group flex items-center justify-between rounded-xl px-2 py-1.5 text-xs transition ${
+                          isDeptSelected
+                            ? 'bg-white/[0.09] font-medium text-white'
+                            : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200'
+                        }`}
+                      >
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenFolders((prev) => ({
+                                ...prev,
+                                [deptKey]: !prev[deptKey],
+                              }));
+                            }}
+                            className="rounded p-0.5 text-[10px] text-zinc-500 hover:text-zinc-200"
+                          >
+                            {isFolderOpen ? '▾' : '▸'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => navigateToDepartmentFolder(deptKey, null)}
+                            className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          >
+                            <span
+                              className={`h-2 w-2 shrink-0 rounded-full ${meta.dotBg}`}
+                            />
+                            <span className="truncate">{meta.label}</span>
+                          </button>
+                        </div>
+
+                        {deptProjects.length > 0 && (
+                          <span className="font-mono text-[10px] text-zinc-600">
+                            {deptProjects.length}
+                          </span>
+                        )}
+                      </div>
+
+                      {isFolderOpen && deptProjects.length > 0 && (
+                        <div className="ml-4 mt-0.5 space-y-0.5 border-l border-white/[0.06] pl-2.5">
+                          {deptProjects.map((proj) => {
+                            const isProjActive =
+                              activeTab === 'workspace' && selectedProjectNavId === proj.id;
+                            return (
+                              <button
+                                key={proj.id}
+                                type="button"
+                                onClick={() => navigateToDepartmentFolder(deptKey, proj.id)}
+                                className={`flex w-full items-center justify-between gap-1.5 rounded-lg px-2 py-1 text-left text-[11px] transition ${
+                                  isProjActive
+                                    ? 'bg-white/[0.08] font-medium text-white'
+                                    : 'text-zinc-500 hover:bg-white/[0.03] hover:text-zinc-300'
+                                }`}
+                              >
+                                <span className="truncate">
+                                  {proj.is_core_team ? '✦ ' : ''}
+                                  {proj.title}
+                                </span>
+                                <span className="shrink-0 font-mono text-[10px] text-zinc-600">
+                                  {proj.progress}%
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Utility Dock */}
+        <div className="space-y-1 border-t border-white/[0.06] p-2">
+          {!navCollapsed ? (
+            <>
+              {outlookConnected ? (
+                <button
+                  type="button"
+                  disabled={syncingOutlook}
+                  onClick={handleManualOutlookSync}
+                  className="flex w-full items-center justify-between rounded-xl px-2.5 py-1.5 text-[11px] text-sky-300 transition hover:bg-white/[0.04]"
+                >
+                  <span>
+                    {syncingOutlook ? '⏳ Sincronizez...' : '📅 Outlook Synced'}
+                  </span>
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={openOutlookPopup}
+                  className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-[11px] text-zinc-400 transition hover:bg-white/[0.04] hover:text-zinc-200"
+                >
+                  <span>📅</span>
+                  <span>Conectează Outlook</span>
+                </button>
+              )}
+
+              <div className="flex items-center justify-between gap-1">
+                <button
+                  type="button"
+                  onClick={() => setExcelModalOpen(true)}
+                  className="flex-1 rounded-xl px-2.5 py-1.5 text-left text-[11px] text-zinc-400 transition hover:bg-white/[0.04] hover:text-zinc-200"
+                >
+                  📥 Import Sheets
+                </button>
+
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setNotifOpen((p) => !p)}
+                    className="relative rounded-xl px-2.5 py-1.5 text-xs text-zinc-400 transition hover:bg-white/[0.04] hover:text-zinc-200"
+                    title="Alerte operaționale"
+                  >
+                    🔔
+                    {notifications.length > 0 && (
+                      <span className="ml-1 rounded-full bg-rose-500 px-1.5 font-mono text-[10px] font-bold text-white">
+                        {notifications.length}
+                      </span>
+                    )}
+                  </button>
+
+                  {notifOpen && (
+                    <div className="absolute bottom-full left-0 z-50 mb-2 w-72 rounded-2xl border border-white/[0.1] bg-[#171920] p-3 shadow-2xl">
+                      <div className="mb-2 flex items-center justify-between border-b border-white/[0.06] pb-1.5">
+                        <span className="text-xs font-medium text-zinc-200">
+                          Alerte ({notifications.length})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setNotifOpen(false)}
+                          className="text-xs text-zinc-500"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="max-h-64 space-y-1.5 overflow-y-auto">
+                        {notifications.length === 0 ? (
+                          <p className="py-4 text-center text-xs text-zinc-500">
+                            Nicio alertă activă.
+                          </p>
+                        ) : (
+                          notifications.map((n) => (
+                            <div
+                              key={n.id}
+                              className="rounded-xl bg-white/[0.03] p-2.5 text-xs"
+                            >
+                              <p className="font-medium text-zinc-200">{n.title}</p>
+                              <p className="mt-0.5 text-[11px] text-zinc-500">{n.detail}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAiDrawerOpen(true)}
+              className="flex w-full justify-center rounded-xl py-2 text-xs text-emerald-400 hover:bg-white/[0.05]"
+              title="Ask Alumn-Bot"
+            >
+              ✦
+            </button>
+          )}
+        </div>
+      </aside>
+
+      {/* ===================================================================== */}
+      {/* MAIN FLOATING WORKSPACE SURFACE                                       */}
+      {/* ===================================================================== */}
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.06] bg-[#101115]">
         <div className="min-h-0 flex-1 overflow-y-auto">
           {activeTab === 'dashboard' && (
             <DashboardView
@@ -479,6 +811,7 @@ export default function AlumniCommandCenter() {
               onRefresh={loadPmpData}
               onAskAiStatus={triggerAskAi}
               onOpenTaskModal={(t) => setActiveTaskModalId(t.id)}
+              onSelectDepartment={(dept) => navigateToDepartmentFolder(dept, null)}
             />
           )}
 
@@ -492,6 +825,14 @@ export default function AlumniCommandCenter() {
               partners={partners}
               projectNotes={projectNotes}
               outlookEvents={outlookEvents}
+              selectedDepartment={selectedDeptFolder}
+              selectedProjectFromNav={selectedProjectNavId}
+              onlyCoreTeamFromNav={onlyCoreTeamNav}
+              onClearNavSelection={() => {
+                setSelectedDeptFolder(null);
+                setSelectedProjectNavId(null);
+                setOnlyCoreTeamNav(false);
+              }}
               onRefresh={loadPmpData}
               onAskAiContext={triggerAskAi}
               onOpenTaskModal={(t) => setActiveTaskModalId(t.id)}
@@ -499,14 +840,14 @@ export default function AlumniCommandCenter() {
           )}
 
           {activeTab === 'crm' && (
-            <div className="mx-auto max-w-6xl space-y-4 p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 pb-3">
-                <div className="flex flex-wrap gap-1.5 text-xs">
+            <div className="mx-auto max-w-5xl space-y-5 px-6 py-6">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-3">
+                <div className="flex flex-wrap gap-1 rounded-xl bg-white/[0.03] p-0.5 text-xs">
                   {[
-                    { id: 'people', label: `👥 Oameni (${people.length})` },
-                    { id: 'resources', label: `📁 Resurse (${resources.length})` },
-                    { id: 'events', label: `📅 Evenimente (${events.length})` },
-                    { id: 'partners', label: `🤝 Parteneri (${partners.length})` },
+                    { id: 'people', label: `Oameni (${people.length})` },
+                    { id: 'resources', label: `Resurse (${resources.length})` },
+                    { id: 'events', label: `Evenimente (${events.length})` },
+                    { id: 'partners', label: `Parteneri (${partners.length})` },
                   ].map((t) => (
                     <button
                       key={t.id}
@@ -514,8 +855,8 @@ export default function AlumniCommandCenter() {
                       onClick={() => setCrmTab(t.id as CrmSubTab)}
                       className={`rounded-lg px-3 py-1.5 font-medium transition ${
                         crmTab === t.id
-                          ? 'border border-emerald-500/40 bg-emerald-500/20 text-emerald-300'
-                          : 'border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                          ? 'bg-white/[0.1] text-white'
+                          : 'text-zinc-400 hover:text-zinc-200'
                       }`}
                     >
                       {t.label}
@@ -526,9 +867,9 @@ export default function AlumniCommandCenter() {
                 <button
                   type="button"
                   onClick={() => setExcelModalOpen(true)}
-                  className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                  className="rounded-lg bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white"
                 >
-                  📥 Sincronizează Google Sheets / Excel
+                  + Import Sheets / Excel
                 </button>
               </div>
 
@@ -539,13 +880,13 @@ export default function AlumniCommandCenter() {
                       type="text"
                       value={crmSearch}
                       onChange={(e) => setCrmSearch(e.target.value)}
-                      placeholder="Caută după nume, rol, oraș, skill..."
-                      className="min-w-[220px] flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100"
+                      placeholder="Caută după nume, rol, oraș..."
+                      className="min-w-[220px] flex-1 rounded-xl border border-white/[0.07] bg-[#15171D] px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none"
                     />
                     <select
                       value={crmDeptFilter}
                       onChange={(e) => setCrmDeptFilter(e.target.value)}
-                      className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200"
+                      className="rounded-xl border border-white/[0.07] bg-[#15171D] px-3 py-2 text-xs text-zinc-200"
                     >
                       <option value="">Toate departamentele</option>
                       {(Object.keys(DEPARTMENTS) as DepartmentKey[]).map((k) => (
@@ -556,34 +897,34 @@ export default function AlumniCommandCenter() {
                     </select>
                   </div>
 
-                  <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900/80">
+                  <div className="overflow-x-auto rounded-2xl border border-white/[0.06] bg-[#15171D]">
                     <table className="w-full text-left text-xs">
-                      <thead className="border-b border-zinc-800 bg-zinc-950 text-[11px] uppercase text-zinc-400">
+                      <thead className="border-b border-white/[0.06] text-[11px] text-zinc-500">
                         <tr>
-                          <th className="px-3 py-2.5">Nume & Contact</th>
-                          <th className="px-3 py-2.5">Rol</th>
-                          <th className="px-3 py-2.5">Departament</th>
-                          <th className="px-3 py-2.5">Locație / Vârstă</th>
-                          <th className="px-3 py-2.5">Detalii / Status</th>
-                          <th className="px-3 py-2.5">Acțiuni</th>
+                          <th className="px-4 py-3 font-medium">Nume &amp; Contact</th>
+                          <th className="px-4 py-3 font-medium">Rol</th>
+                          <th className="px-4 py-3 font-medium">Departament</th>
+                          <th className="px-4 py-3 font-medium">Locație</th>
+                          <th className="px-4 py-3 font-medium">Detalii</th>
+                          <th className="px-4 py-3 font-medium"></th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-zinc-800/70">
+                      <tbody className="divide-y divide-white/[0.04]">
                         {filteredPeople.map((p) => {
                           const meta = DEPARTMENTS[p.department] || DEPARTMENTS.Comunitati;
                           return (
-                            <tr key={p.id} className="hover:bg-zinc-800/40">
-                              <td className="px-3 py-2">
+                            <tr key={p.id} className="hover:bg-white/[0.02]">
+                              <td className="px-4 py-2.5">
                                 <div className="font-medium text-zinc-100">{p.full_name}</div>
                                 <div className="text-[11px] text-zinc-500">
                                   {[p.phone, p.email].filter(Boolean).join(' · ')}
                                 </div>
                               </td>
-                              <td className="px-3 py-2">
+                              <td className="px-4 py-2.5">
                                 <select
                                   value={p.role}
                                   onChange={(e) => handleRoleChange(p.id, e.target.value)}
-                                  className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 focus:border-emerald-500 focus:outline-none"
+                                  className="rounded-lg border border-white/[0.07] bg-[#0F1014] px-2 py-1 text-[11px] text-zinc-200 focus:outline-none"
                                 >
                                   {HIERARCHICAL_ROLES.map((r) => (
                                     <option key={r} value={r}>
@@ -592,28 +933,27 @@ export default function AlumniCommandCenter() {
                                   ))}
                                 </select>
                               </td>
-                              <td className="px-3 py-2">
-                                <span
-                                  className={`rounded px-2 py-0.5 text-[11px] ${meta.badgeBg} ${meta.badgeText}`}
-                                >
+                              <td className="px-4 py-2.5">
+                                <span className="inline-flex items-center gap-1.5 text-[11px] text-zinc-300">
+                                  <span className={`h-2 w-2 rounded-full ${meta.dotBg}`} />
                                   {meta.label}
                                 </span>
                               </td>
-                              <td className="px-3 py-2 text-zinc-400">
+                              <td className="px-4 py-2.5 text-zinc-400">
                                 {[p.location, p.age ? `${p.age} ani` : null]
                                   .filter(Boolean)
                                   .join(' · ') || '-'}
                               </td>
-                              <td className="max-w-[260px] px-3 py-2 text-[11px] text-zinc-400">
+                              <td className="max-w-[240px] truncate px-4 py-2.5 text-[11px] text-zinc-500">
                                 {p.notes || '-'}
                               </td>
-                              <td className="px-3 py-2">
+                              <td className="px-4 py-2.5 text-right">
                                 <button
                                   type="button"
                                   onClick={() => copyPersonSummary(p)}
-                                  className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-300 hover:border-emerald-500/50"
+                                  className="rounded-lg border border-white/[0.07] px-2.5 py-1 text-[11px] text-zinc-400 hover:text-white"
                                 >
-                                  {copiedPersonId === p.id ? '✓ Copiat' : '📋 Summary'}
+                                  {copiedPersonId === p.id ? '✓ Copiat' : 'Summary'}
                                 </button>
                               </td>
                             </tr>
@@ -626,24 +966,21 @@ export default function AlumniCommandCenter() {
               )}
 
               {crmTab === 'resources' && (
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-xs">
+                <div className="rounded-2xl border border-white/[0.06] bg-[#15171D] p-4 text-xs">
                   {resources.length === 0 ? (
-                    <p className="text-center text-zinc-500">Nicio resursă importată încă.</p>
+                    <p className="py-6 text-center text-zinc-500">Nicio resursă importată.</p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="divide-y divide-white/[0.04]">
                       {resources.map((r) => (
-                        <div
-                          key={r.id}
-                          className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2"
-                        >
+                        <div key={r.id} className="flex items-center justify-between py-2.5">
                           <div>
-                            <span className="mr-2 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                            <span className="mr-2 rounded bg-white/[0.05] px-2 py-0.5 text-[10px] text-zinc-400">
                               {r.type}
                             </span>
-                            <span className="font-medium text-zinc-100">{r.title}</span>
+                            <span className="font-medium text-zinc-200">{r.title}</span>
                           </div>
                           {r.url_or_ref && (
-                            <span className="truncate font-mono text-[11px] text-sky-400">
+                            <span className="truncate font-mono text-[11px] text-zinc-400">
                               {r.url_or_ref}
                             </span>
                           )}
@@ -655,20 +992,16 @@ export default function AlumniCommandCenter() {
               )}
 
               {crmTab === 'events' && (
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-xs">
+                <div className="rounded-2xl border border-white/[0.06] bg-[#15171D] p-4 text-xs">
                   {events.length === 0 ? (
-                    <p className="text-center text-zinc-500">Niciun eveniment înregistrat încă.</p>
+                    <p className="py-6 text-center text-zinc-500">Niciun eveniment înregistrat.</p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="divide-y divide-white/[0.04]">
                       {events.map((ev) => (
-                        <div
-                          key={ev.id}
-                          className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2"
-                        >
-                          <span className="font-medium text-zinc-100">{ev.name}</span>
-                          <span className="text-zinc-400">
-                            {ev.location || 'Locație N/A'} · {ev.start_date || 'Dată N/A'} (
-                            {ev.status})
+                        <div key={ev.id} className="flex items-center justify-between py-2.5">
+                          <span className="font-medium text-zinc-200">{ev.name}</span>
+                          <span className="text-zinc-500">
+                            {ev.location || 'N/A'} · {ev.start_date || 'N/A'} ({ev.status})
                           </span>
                         </div>
                       ))}
@@ -678,18 +1011,15 @@ export default function AlumniCommandCenter() {
               )}
 
               {crmTab === 'partners' && (
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-xs">
+                <div className="rounded-2xl border border-white/[0.06] bg-[#15171D] p-4 text-xs">
                   {partners.length === 0 ? (
-                    <p className="text-center text-zinc-500">Niciun partener înregistrat încă.</p>
+                    <p className="py-6 text-center text-zinc-500">Niciun partener înregistrat.</p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="divide-y divide-white/[0.04]">
                       {partners.map((pt) => (
-                        <div
-                          key={pt.id}
-                          className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2"
-                        >
-                          <span className="font-medium text-zinc-100">{pt.name}</span>
-                          <span className="text-zinc-400">
+                        <div key={pt.id} className="flex items-center justify-between py-2.5">
+                          <span className="font-medium text-zinc-200">{pt.name}</span>
+                          <span className="text-zinc-500">
                             {pt.contact_person || '-'} · {pt.status}
                           </span>
                         </div>
@@ -701,16 +1031,16 @@ export default function AlumniCommandCenter() {
             </div>
           )}
 
-          {/* HUB CENTRAL NOTIȚE */}
+{/* HUB CENTRAL NOTIȚE (POST-IT + PROIECTE + ȘEDINȚE — CU EDITARE & ȘTERGERE) */}
           {activeTab === 'notes' && (
-            <div className="mx-auto max-w-5xl space-y-5 p-5">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3 text-xs">
-                <div className="flex flex-wrap gap-1.5">
+            <div className="mx-auto max-w-5xl space-y-5 px-6 py-6">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3 text-xs">
+                <div className="flex flex-wrap gap-1 rounded-xl bg-white/[0.03] p-0.5">
                   {[
                     { id: 'all', label: `Toate (${totalAllNotes})` },
-                    { id: 'postit', label: `📌 Post-it Dashboard (${postItNotes.length})` },
-                    { id: 'project', label: `📁 Notițe Proiecte (${projectNotes.length})` },
-                    { id: 'general', label: `📝 Ședințe & Generale (${generalNotes.length})` },
+                    { id: 'postit', label: `📌 Post-it (${postItNotes.length})` },
+                    { id: 'project', label: `📁 Proiecte (${projectNotes.length})` },
+                    { id: 'general', label: `📝 Ședințe (${generalNotes.length})` },
                   ].map((f) => (
                     <button
                       key={f.id}
@@ -718,8 +1048,8 @@ export default function AlumniCommandCenter() {
                       onClick={() => setNotesFilter(f.id as NotesFilter)}
                       className={`rounded-lg px-3 py-1.5 font-medium transition ${
                         notesFilter === f.id
-                          ? 'border border-emerald-500/40 bg-emerald-500/20 text-emerald-300'
-                          : 'border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                          ? 'bg-white/[0.1] text-white'
+                          : 'text-zinc-400 hover:text-zinc-200'
                       }`}
                     >
                       {f.label}
@@ -728,232 +1058,424 @@ export default function AlumniCommandCenter() {
                 </div>
               </div>
 
+              {/* Formular Unificat cu Alegere Destinație */}
               <form
-                onSubmit={handleCreateGeneralNote}
-                className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-xs"
+                onSubmit={handleCreateUnifiedNote}
+                className="space-y-3 rounded-2xl border border-white/[0.06] bg-[#15171D] p-4 text-xs"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="font-semibold text-zinc-100">
-                    📝 Adaugă Notiță de Ședință / Operațională
-                  </h3>
-                  <label className="flex cursor-pointer items-center gap-1.5 text-violet-300">
-                    <input
-                      type="checkbox"
-                      checked={noteAiMemory}
-                      onChange={(e) => setNoteAiMemory(e.target.checked)}
-                      className="accent-violet-500"
-                    />
-                    <span>📌 Include în Memoria Live a AI-ului</span>
-                  </label>
+                  <div className="flex items-center gap-1 rounded-xl bg-[#0F1014] p-1">
+                    {[
+                      { id: 'general', label: '📝 Notiță Ședință / Generală' },
+                      { id: 'project', label: '📁 Legată de Proiect' },
+                      { id: 'postit', label: '📌 Post-it Personal (Dashboard)' },
+                    ].map((dest) => (
+                      <button
+                        key={dest.id}
+                        type="button"
+                        onClick={() =>
+                          setNoteDestination(dest.id as 'general' | 'postit' | 'project')
+                        }
+                        className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition ${
+                          noteDestination === dest.id
+                            ? 'bg-white/[0.12] text-white'
+                            : 'text-zinc-500 hover:text-zinc-300'
+                        }`}
+                      >
+                        {dest.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {noteDestination !== 'postit' && (
+                    <label className="flex cursor-pointer items-center gap-2 text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={noteAiMemory}
+                        onChange={(e) => setNoteAiMemory(e.target.checked)}
+                        className="accent-emerald-500"
+                      />
+                      <span>Memorie live AI</span>
+                    </label>
+                  )}
                 </div>
 
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <input
-                    type="text"
-                    value={noteTitle}
-                    onChange={(e) => setNoteTitle(e.target.value)}
-                    placeholder="Titlu notiță..."
-                    className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-zinc-100 sm:col-span-2"
-                  />
-                  <input
-                    type="text"
-                    value={noteCategory}
-                    onChange={(e) => setNoteCategory(e.target.value)}
-                    placeholder="Categorie (ex: Board, 1-on-1)"
-                    className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-zinc-100"
-                  />
-                </div>
+                {noteDestination === 'general' && (
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <input
+                      type="text"
+                      value={noteTitle}
+                      onChange={(e) => setNoteTitle(e.target.value)}
+                      placeholder="Titlu ședință / notiță..."
+                      className="rounded-xl border border-white/[0.07] bg-[#0F1014] px-3 py-2 text-zinc-100 placeholder-zinc-600 focus:outline-none sm:col-span-2"
+                    />
+                    <input
+                      type="text"
+                      value={noteCategory}
+                      onChange={(e) => setNoteCategory(e.target.value)}
+                      placeholder="Categorie (ex: Ședință Board)"
+                      className="rounded-xl border border-white/[0.07] bg-[#0F1014] px-3 py-2 text-zinc-100 placeholder-zinc-600 focus:outline-none"
+                    />
+                  </div>
+                )}
+
+                {noteDestination === 'project' && (
+                  <select
+                    required
+                    value={noteTargetProjectId}
+                    onChange={(e) => setNoteTargetProjectId(e.target.value)}
+                    className="w-full rounded-xl border border-white/[0.07] bg-[#0F1014] px-3 py-2 text-zinc-200 focus:outline-none"
+                  >
+                    <option value="">Alege proiectul în care se salvează notița...</option>
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.title} ({DEPARTMENTS[p.department]?.label})
+                      </option>
+                    ))}
+                  </select>
+                )}
 
                 <textarea
                   rows={3}
+                  required
                   value={noteContent}
                   onChange={(e) => setNoteContent(e.target.value)}
-                  placeholder="Scrie idei, decizii din ședințe sau observații..."
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 p-2.5 text-zinc-100"
+                  placeholder="Scrie conținutul notiței..."
+                  className="w-full rounded-xl border border-white/[0.07] bg-[#0F1014] p-3 text-zinc-100 placeholder-zinc-600 focus:outline-none"
                 />
 
                 <div className="flex justify-end">
                   <button
                     type="submit"
-                    className="rounded-lg bg-emerald-600 px-4 py-1.5 font-medium text-white hover:bg-emerald-500"
+                    className="rounded-lg bg-zinc-100 px-4 py-1.5 font-medium text-zinc-900 hover:bg-white"
                   >
                     Salvează Notița
                   </button>
                 </div>
               </form>
 
+              {/* Lista Tuturor Notițelor cu Editare & Ștergere */}
               <div className="grid gap-3 sm:grid-cols-2">
+                {/* 1. POST-IT NOTES */}
                 {(notesFilter === 'all' || notesFilter === 'postit') &&
-                  postItNotes.map((pi) => (
-                    <div
-                      key={`pi-${pi.id}`}
-                      className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
-                          📌 Post-it Dashboard
-                        </span>
-                        <span className="text-[10px] text-zinc-400">
-                          {new Date(pi.created_at).toLocaleDateString('ro-RO')}
-                        </span>
-                      </div>
-                      <p className="mt-2 whitespace-pre-wrap text-amber-100">{pi.content}</p>
-                      <div className="mt-3 flex justify-end border-t border-amber-500/20 pt-2">
-                        <button
-                          type="button"
-                          disabled={extractingNoteId === pi.id}
-                          onClick={() =>
-                            handleExtractActions(pi.id, 'Post-it Dashboard', pi.content)
-                          }
-                          className="rounded-lg border border-amber-500/40 bg-zinc-950/60 px-2.5 py-1 text-[11px] font-medium text-amber-300"
-                        >
-                          {extractingNoteId === pi.id
-                            ? 'Analizez...'
-                            : '✨ Extrage acțiuni în PMP'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-
-                {(notesFilter === 'all' || notesFilter === 'project') &&
-                  projectNotes.map((pn) => {
-                    const parentProj = projectMap.get(pn.project_id);
+                  postItNotes.map((pi) => {
+                    const isEditing = editingNoteKey === `postit-${pi.id}`;
                     return (
                       <div
-                        key={`pn-${pn.id}`}
-                        className="rounded-xl border border-sky-500/30 bg-zinc-900/80 p-4 text-xs"
+                        key={`pi-${pi.id}`}
+                        className="rounded-2xl border border-amber-400/20 bg-amber-500/[0.06] p-4 text-xs"
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300">
-                            📁 Proiect: {parentProj?.title || 'Proiect'}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              toggleNoteMemory('project', pn.id, !pn.is_ai_memory)
-                            }
-                            className={`rounded px-2 py-0.5 text-[10px] font-medium ${
-                              pn.is_ai_memory
-                                ? 'border border-violet-500/40 bg-violet-500/20 text-violet-300'
-                                : 'bg-zinc-800 text-zinc-400'
-                            }`}
-                          >
-                            {pn.is_ai_memory ? '📌 Memorie AI' : '+ Memorie AI'}
-                          </button>
+                        <div className="flex items-center justify-between text-[11px] text-amber-300/80">
+                          <span>📌 Post-it Personal</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingNoteKey(isEditing ? null : `postit-${pi.id}`);
+                                setEditContent(pi.content);
+                              }}
+                              className="text-zinc-300 hover:text-white"
+                            >
+                              {isEditing ? 'Anulează' : 'Editează'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteAnyNote('postit', pi.id)}
+                              className="text-rose-400 hover:text-rose-300"
+                            >
+                              Șterge
+                            </button>
+                          </div>
                         </div>
-                        <p className="mt-2 whitespace-pre-wrap text-zinc-200">{pn.content}</p>
-                        <div className="mt-3 flex items-center justify-between border-t border-zinc-800 pt-2">
-                          <span className="text-[10px] text-zinc-500">
-                            {new Date(pn.created_at).toLocaleDateString('ro-RO')}
-                          </span>
-                          <button
-                            type="button"
-                            disabled={extractingNoteId === pn.id}
-                            onClick={() =>
-                              handleExtractActions(
-                                pn.id,
-                                parentProj?.title || 'Proiect',
-                                pn.content
-                              )
-                            }
-                            className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-medium text-amber-300"
-                          >
-                            {extractingNoteId === pn.id
-                              ? 'Analizez...'
-                              : '✨ Extrage acțiuni în PMP'}
-                          </button>
-                        </div>
+
+                        {isEditing ? (
+                          <div className="mt-2 space-y-2">
+                            <textarea
+                              rows={3}
+                              value={editContent}
+                              onChange={(e) => setEditContent(e.target.value)}
+                              className="w-full rounded-xl border border-white/[0.1] bg-[#0F1014] p-2.5 text-zinc-100"
+                            />
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => saveEditedNote('postit', pi.id)}
+                                className="rounded-lg bg-zinc-100 px-3 py-1 font-medium text-zinc-900"
+                              >
+                                Salvează
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <p className="mt-2 whitespace-pre-wrap text-zinc-200">
+                              {pi.content}
+                            </p>
+                            <div className="mt-3 flex justify-end pt-2">
+                              <button
+                                type="button"
+                                disabled={extractingNoteId === pi.id}
+                                onClick={() =>
+                                  handleExtractActions(pi.id, 'Post-it Dashboard', pi.content)
+                                }
+                                className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-[11px] text-zinc-300 hover:text-white"
+                              >
+                                {extractingNoteId === pi.id
+                                  ? 'Analizez...'
+                                  : '✦ Extrage acțiuni'}
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
                     );
                   })}
 
-                {(notesFilter === 'all' || notesFilter === 'general') &&
-                  generalNotes.map((n) => (
-                    <div
-                      key={n.id}
-                      className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-4 text-xs"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300">
-                          {n.category}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => toggleNoteMemory('general', n.id, !n.is_ai_memory)}
-                          className={`rounded px-2 py-0.5 text-[10px] font-medium ${
-                            n.is_ai_memory
-                              ? 'border border-violet-500/40 bg-violet-500/20 text-violet-300'
-                              : 'bg-zinc-800 text-zinc-400'
-                          }`}
-                        >
-                          {n.is_ai_memory ? '📌 Memorie AI Activă' : 'Adaugă în Memorie AI'}
-                        </button>
-                      </div>
-                      <h4 className="mt-2 font-semibold text-zinc-100">{n.title}</h4>
-                      <p className="mt-1 whitespace-pre-wrap text-zinc-300">{n.content}</p>
-
-                      <div className="mt-3 flex items-center justify-end border-t border-zinc-800/80 pt-2">
-                        <button
-                          type="button"
-                          disabled={extractingNoteId === n.id}
-                          onClick={() => handleExtractActions(n.id, n.title, n.content)}
-                          className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-medium text-amber-300 hover:bg-amber-500/25 disabled:opacity-40"
-                        >
-                          {extractingNoteId === n.id
-                            ? 'Analizez notița...'
-                            : '✨ Extrage acțiuni în PMP'}
-                        </button>
-                      </div>
-
-                      {noteProposals[n.id] && (
-                        <div className="mt-2.5 space-y-1.5 rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
-                          {noteProposals[n.id].length === 0 ? (
-                            <p className="text-[11px] text-zinc-500">
-                              Nu am detectat task-uri sau update-uri concrete în această notiță.
-                            </p>
-                          ) : (
-                            noteProposals[n.id].map((prop) => (
-                              <div
-                                key={prop.id}
-                                className="flex items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px]"
-                              >
-                                <div className="min-w-0 flex-1">
-                                  <div className="font-medium text-zinc-100">
-                                    {prop.kind === 'create_milestone'
-                                      ? '🟡 Milestone: '
-                                      : prop.kind === 'update_project_progress'
-                                        ? `📈 Progres ${prop.new_progress}%: `
-                                        : '⚡ Task: '}
-                                    {prop.title}
-                                  </div>
-                                  <div className="text-[10px] text-zinc-400">
-                                    {prop.department}
-                                    {prop.assignee_name ? ` · 👤 ${prop.assignee_name}` : ''}
-                                    {prop.deadline ? ` · 📅 ${prop.deadline}` : ''}
-                                  </div>
-                                </div>
-
-                                {appliedProposalIds[prop.id] ? (
-                                  <span className="font-semibold text-emerald-400">✓ Aplicat</span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => applyExtractedProposal(prop)}
-                                    className="shrink-0 rounded bg-emerald-600 px-2.5 py-1 font-medium text-white hover:bg-emerald-500"
-                                  >
-                                    ✓ Aplică
-                                  </button>
-                                )}
-                              </div>
-                            ))
-                          )}
+                {/* 2. PROJECT NOTES */}
+                {(notesFilter === 'all' || notesFilter === 'project') &&
+                  projectNotes.map((pn) => {
+                    const parentProj = projectMap.get(pn.project_id);
+                    const isEditing = editingNoteKey === `project-${pn.id}`;
+                    return (
+                      <div
+                        key={`pn-${pn.id}`}
+                        className="rounded-2xl border border-white/[0.06] bg-[#15171D] p-4 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-[11px] font-medium text-sky-300">
+                            📁 {parentProj?.title || 'Proiect'}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                toggleNoteMemory('project', pn.id, !pn.is_ai_memory)
+                              }
+                              className={`rounded-md px-2 py-0.5 text-[10px] ${
+                                pn.is_ai_memory
+                                  ? 'bg-emerald-500/15 text-emerald-300'
+                                  : 'bg-white/[0.04] text-zinc-500'
+                              }`}
+                            >
+                              {pn.is_ai_memory ? 'Memorie AI' : '+ Memorie'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingNoteKey(isEditing ? null : `project-${pn.id}`);
+                                setEditContent(pn.content);
+                              }}
+                              className="text-[11px] text-zinc-400 hover:text-white"
+                            >
+                              {isEditing ? 'Anulează' : 'Editează'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteAnyNote('project', pn.id)}
+                              className="text-[11px] text-rose-400 hover:text-rose-300"
+                            >
+                              Șterge
+                            </button>
+                          </div>
                         </div>
-                      )}
-                    </div>
-                  ))}
+
+                        {isEditing ? (
+                          <div className="mt-2 space-y-2">
+                            <textarea
+                              rows={3}
+                              value={editContent}
+                              onChange={(e) => setEditContent(e.target.value)}
+                              className="w-full rounded-xl border border-white/[0.1] bg-[#0F1014] p-2.5 text-zinc-100"
+                            />
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => saveEditedNote('project', pn.id)}
+                                className="rounded-lg bg-zinc-100 px-3 py-1 font-medium text-zinc-900"
+                              >
+                                Salvează
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <p className="mt-2 whitespace-pre-wrap text-zinc-200">
+                              {pn.content}
+                            </p>
+                            <div className="mt-3 flex items-center justify-between pt-2">
+                              <span className="text-[10px] text-zinc-500">
+                                {new Date(pn.created_at).toLocaleDateString('ro-RO')}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={extractingNoteId === pn.id}
+                                onClick={() =>
+                                  handleExtractActions(
+                                    pn.id,
+                                    parentProj?.title || 'Proiect',
+                                    pn.content
+                                  )
+                                }
+                                className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-[11px] text-zinc-300 hover:text-white"
+                              >
+                                {extractingNoteId === pn.id
+                                  ? 'Analizez...'
+                                  : '✦ Extrage acțiuni'}
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                {/* 3. GENERAL / MEETING NOTES */}
+                {(notesFilter === 'all' || notesFilter === 'general') &&
+                  generalNotes.map((n) => {
+                    const isEditing = editingNoteKey === `general-${n.id}`;
+                    return (
+                      <div
+                        key={n.id}
+                        className="rounded-2xl border border-white/[0.06] bg-[#15171D] p-4 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] text-zinc-500">📝 {n.category}</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                toggleNoteMemory('general', n.id, !n.is_ai_memory)
+                              }
+                              className={`rounded-md px-2 py-0.5 text-[10px] ${
+                                n.is_ai_memory
+                                  ? 'bg-emerald-500/15 text-emerald-300'
+                                  : 'bg-white/[0.04] text-zinc-500'
+                              }`}
+                            >
+                              {n.is_ai_memory ? 'Memorie AI' : '+ Memorie'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingNoteKey(isEditing ? null : `general-${n.id}`);
+                                setEditTitle(n.title);
+                                setEditCategory(n.category);
+                                setEditContent(n.content);
+                              }}
+                              className="text-[11px] text-zinc-400 hover:text-white"
+                            >
+                              {isEditing ? 'Anulează' : 'Editează'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteAnyNote('general', n.id)}
+                              className="text-[11px] text-rose-400 hover:text-rose-300"
+                            >
+                              Șterge
+                            </button>
+                          </div>
+                        </div>
+
+                        {isEditing ? (
+                          <div className="mt-2 space-y-2">
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <input
+                                type="text"
+                                value={editTitle}
+                                onChange={(e) => setEditTitle(e.target.value)}
+                                className="rounded-lg border border-white/[0.1] bg-[#0F1014] px-2.5 py-1.5 text-zinc-100"
+                              />
+                              <input
+                                type="text"
+                                value={editCategory}
+                                onChange={(e) => setEditCategory(e.target.value)}
+                                className="rounded-lg border border-white/[0.1] bg-[#0F1014] px-2.5 py-1.5 text-zinc-100"
+                              />
+                            </div>
+                            <textarea
+                              rows={3}
+                              value={editContent}
+                              onChange={(e) => setEditContent(e.target.value)}
+                              className="w-full rounded-xl border border-white/[0.1] bg-[#0F1014] p-2.5 text-zinc-100"
+                            />
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => saveEditedNote('general', n.id)}
+                                className="rounded-lg bg-zinc-100 px-3 py-1 font-medium text-zinc-900"
+                              >
+                                Salvează
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <h4 className="mt-1.5 font-semibold text-zinc-100">{n.title}</h4>
+                            <p className="mt-1 whitespace-pre-wrap text-zinc-300">
+                              {n.content}
+                            </p>
+
+                            <div className="mt-3 flex items-center justify-end pt-2">
+                              <button
+                                type="button"
+                                disabled={extractingNoteId === n.id}
+                                onClick={() =>
+                                  handleExtractActions(n.id, n.title, n.content)
+                                }
+                                className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-[11px] text-zinc-300 hover:text-white"
+                              >
+                                {extractingNoteId === n.id
+                                  ? 'Analizez...'
+                                  : '✦ Extrage acțiuni'}
+                              </button>
+                            </div>
+                          </>
+                        )}
+
+                        {noteProposals[n.id] && (
+                          <div className="mt-2.5 space-y-1.5 rounded-xl bg-[#0F1014] p-2.5">
+                            {noteProposals[n.id].length === 0 ? (
+                              <p className="text-[11px] text-zinc-500">
+                                Nicio acțiune concretă detectată.
+                              </p>
+                            ) : (
+                              noteProposals[n.id].map((prop) => (
+                                <div
+                                  key={prop.id}
+                                  className="flex items-center justify-between gap-2 rounded-lg bg-white/[0.03] px-2.5 py-1.5 text-[11px]"
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="font-medium text-zinc-200">
+                                      {prop.title}
+                                    </div>
+                                    <div className="text-[10px] text-zinc-500">
+                                      {prop.department}
+                                      {prop.assignee_name ? ` · ${prop.assignee_name}` : ''}
+                                    </div>
+                                  </div>
+
+                                  {appliedProposalIds[prop.id] ? (
+                                    <span className="text-emerald-400">✓ Aplicat</span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => applyExtractedProposal(prop)}
+                                      className="rounded-md bg-zinc-100 px-2.5 py-1 font-medium text-zinc-900"
+                                    >
+                                      Aplică
+                                    </button>
+                                  )}
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
               </div>
             </div>
-          )}
+          )}        
 
           {activeTab === 'ai' && (
             <AlumnBotView
@@ -962,9 +1484,9 @@ export default function AlumniCommandCenter() {
             />
           )}
         </div>
-      </div>
+      </main>
 
-      {/* JIRA / ASANA TASK & SUBTASK DETAIL MODAL */}
+      {/* JIRA / ASANA TASK DETAIL MODAL */}
       {activeTaskModal && (
         <TaskDetailModal
           task={activeTaskModal}
@@ -977,19 +1499,20 @@ export default function AlumniCommandCenter() {
         />
       )}
 
-      {/* CONTEXTUAL ASK AI SLIDE-OVER DRAWER */}
+      {/* DIA-STYLE FLOATING AI COPILOT DRAWER */}
       {aiDrawerOpen && activeTab !== 'ai' && (
-        <div className="fixed inset-y-0 right-0 z-40 flex w-full max-w-xl flex-col border-l border-zinc-700 bg-zinc-950 shadow-2xl">
-          <div className="flex h-12 items-center justify-between border-b border-zinc-800 bg-zinc-900 px-4">
-            <span className="text-xs font-semibold text-emerald-300">
-              🤖 Alumn-Bot Live Copilot
+        <div className="fixed inset-y-3 right-3 z-40 flex w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/[0.1] bg-[#13151A] shadow-2xl">
+          <div className="flex h-11 items-center justify-between border-b border-white/[0.06] px-4">
+            <span className="flex items-center gap-2 text-xs font-medium text-zinc-200">
+              <span className="text-emerald-400">✦</span>
+              <span>Alumn-Bot</span>
             </span>
             <button
               type="button"
               onClick={() => setAiDrawerOpen(false)}
-              className="rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              className="rounded-lg px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200"
             >
-              ✕ Închide
+              ✕
             </button>
           </div>
           <div className="min-h-0 flex-1">

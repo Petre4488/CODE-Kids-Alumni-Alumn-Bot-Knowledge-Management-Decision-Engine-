@@ -45,6 +45,7 @@ export function TaskDetailModal({
   const [startDate, setStartDate] = useState<string | null>(task.start_date);
   const [deadline, setDeadline] = useState<string | null>(task.deadline);
   const [isMyTask, setIsMyTask] = useState<boolean>(task.is_my_task);
+  const [needsPmSync, setNeedsPmSync] = useState<boolean>(Boolean(task.needs_pm_sync));
 
   // Subtask creator inline
   const [subTitle, setSubTitle] = useState('');
@@ -72,6 +73,7 @@ export function TaskDetailModal({
         body: JSON.stringify({
           action: 'update_task',
           id: task.id,
+          needs_pm_sync: needsPmSync,
           title: title.trim(),
           description: description.trim() || null,
           status,
@@ -329,6 +331,7 @@ export function TaskDetailModal({
                       tasks={allTasks}
                       value={subAssigneeId}
                       onChange={setSubAssigneeId}
+                      onPersonCreated={onRefresh}
                       placeholder="Responsabil subtask (opțional)..."
                     />
                     <CalendarRangePicker
@@ -483,6 +486,15 @@ export function TaskDetailModal({
                 className="accent-emerald-500"
               />
               <span>Apare în „Focusul Meu” (Dashboard)</span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-violet-500/25 bg-violet-500/10 px-2.5 py-2 text-violet-200">
+              <input
+                type="checkbox"
+                checked={needsPmSync}
+                onChange={(e) => setNeedsPmSync(e.target.checked)}
+                className="accent-violet-500"
+              />
+              <span>💬 De discutat cu Vlad (PM)</span>
             </label>
           </div>
         </div>
