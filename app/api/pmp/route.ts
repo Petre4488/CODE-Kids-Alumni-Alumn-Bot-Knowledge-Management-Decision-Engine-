@@ -454,17 +454,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    if (action === 'ensure_core_person') {
+if (action === 'ensure_core_person') {
       const targetName = String(body.full_name || '').trim();
       const targetRole = String(body.role || 'Manager').trim();
-      const { data: existingList } = await supabase
-        .from('people')
-        .select('*')
-        .ilike('full_name', `%${targetName}%`)
-        .limit(1);
+      const isPetreTarget = normKey(targetName).includes('petre');
+      const isVladTarget = normKey(targetName).includes('vlad');
 
-      if (existingList && existingList.length > 0) {
-        return NextResponse.json({ ok: true, person: existingList[0] });
+      const { data: allPeople } = await supabase.from('people').select('*');
+      const list = allPeople || [];
+
+      const matched = list.find((p) => {
+        const n = normKey(p.full_name);
+        if (isPetreTarget) {
+          return (
+            (n.includes('circeag') && n.includes('petre')) ||
+            (n.includes('petre') && (p.role === 'Manager' || p.department === 'Board'))
+          );
+        }
+        if (isVladTarget) {
+          return (
+            (n.includes('brinzan') && n.includes('vlad')) ||
+            (n.includes('vlad') && (p.role === 'Monitorizare' || p.department === 'Board'))
+          );
+        }
+        return n === normKey(targetName);
+      });
+
+      if (matched) {
+        return NextResponse.json({ ok: true, person: matched });
       }
 
       const { data: created, error } = await supabase
@@ -529,6 +546,224 @@ export async function POST(req: NextRequest) {
     if (action === 'delete_project') {
       const { error } = await supabase.from('projects').delete().eq('id', body.id);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
+    }
+
+    // 2B. PROMOVARE TASK FĂRĂ PROIECT LA PROIECT COMPLET
+    if (action === 'promote_task_to_project') {
+      const { data: task, error: fetchErr } = await supabase
+        .from('tasks')
+        .select('*')
+        .eq('id', body.id)
+        .single();
+
+      if (fetchErr || !task) {
+        return NextResponse.json({ error: 'Task negăsit.' }, { status: 404 });
+      }
+
+      const { data: newProj, error: projErr } = await supabase
+        .from('projects')
+        .insert({
+          title: task.title,
+          description: task.description || null,
+          department: normalizeDepartment(task.department),
+          owner_id: task.assignee_id || null,
+          status: task.status === 'done' ? 'completed' : 'active',
+          progress: task.status === 'done' ? 100 : 0,
+          is_core_team: Boolean(task.is_my_task),
+          needs_pm_sync: Boolean(task.needs_pm_sync),
+          start_date: task.start_date || null,
+          deadline: task.deadline || null,
+        })
+        .select('*')
+        .single();
+
+      if (projErr || !newProj) {
+        return NextResponse.json(
+          { error: projErr?.message || 'Eroare la crearea proiectului.' },
+          { status: 500 }
+        );
+      }
+
+      await supabase
+        .from('tasks')
+        .update({ project_id: newProj.id })
+        .eq('id', task.id);
+
+      await supabase
+        .from('tasks')
+        .update({ project_id: newProj.id, parent_task_id: null })
+        .eq('parent_task_id', task.id);
+
+      await recalculateProjectProgress(newProj.id);
+      return NextResponse.json({ ok: true, project: newProj });
+    }
+
+    // 2C. EXECUTARE PLAN APROBAT DIN ALUMN-BOT (PROIECT NOU/EXISTENT + TASK-URI)
+    if (action === 'execute_ai_plan') {
+      const projectSpec = body.project || null;
+      const proposedTasks: Record<string, unknown>[] = Array.isArray(body.tasks)
+        ? body.tasks
+        : [];
+
+      let targetProjectId: string | null = null;
+      let createdProjectTitle: string | null = null;
+
+      if (projectSpec?.mode === 'new' && String(projectSpec.title || '').trim()) {
+        const { data: createdProj, error: pErr } = await supabase
+          .from('projects')
+          .insert({
+            title: String(projectSpec.title).trim(),
+            description: projectSpec.description ? String(projectSpec.description).trim() : null,
+            department: normalizeDepartment(String(projectSpec.department || 'Board')),
+            owner_id: projectSpec.owner_id || null,
+            status: 'active',
+            progress: 0,
+            is_core_team: Boolean(projectSpec.is_core_team),
+            needs_pm_sync: Boolean(projectSpec.needs_pm_sync),
+            start_date: projectSpec.start_date || null,
+            deadline: projectSpec.deadline || null,
+          })
+          .select('*')
+          .single();
+
+        if (pErr || !createdProj) {
+          return NextResponse.json(
+            { error: pErr?.message || 'Nu am putut crea proiectul propus.' },
+            { status: 500 }
+          );
+        }
+        targetProjectId = createdProj.id;
+        createdProjectTitle = createdProj.title;
+      } else if (projectSpec?.mode === 'existing' && projectSpec.existing_project_id) {
+        targetProjectId = String(projectSpec.existing_project_id);
+      }
+
+      let createdTasksCount = 0;
+      const touchedProjectIds = new Set<string>();
+      if (targetProjectId) touchedProjectIds.add(targetProjectId);
+
+      for (const item of proposedTasks) {
+        const tTitle = String(item.title || '').trim();
+        if (!tTitle) continue;
+
+        const itemProjId =
+          item.project_id !== undefined
+            ? (item.project_id as string | null)
+            : targetProjectId;
+
+        if (itemProjId) touchedProjectIds.add(itemProjId);
+
+        const { data: createdTask, error: tErr } = await supabase
+          .from('tasks')
+          .insert({
+            project_id: itemProjId || null,
+            parent_task_id: null,
+            title: tTitle,
+            description: item.description ? String(item.description).trim() : null,
+            type: item.type === 'milestone' ? 'milestone' : 'task',
+            status: 'todo',
+            priority: ['low', 'medium', 'high', 'urgent'].includes(String(item.priority))
+              ? String(item.priority)
+              : 'medium',
+            estimated_hours: Math.max(0.5, Number(item.estimated_hours ?? 2)),
+            blocked_by_id: null,
+            is_my_task: Boolean(item.is_my_task),
+            needs_pm_sync: Boolean(item.needs_pm_sync),
+            assignee_id: item.assignee_id || null,
+            department: normalizeDepartment(
+              String(item.department || projectSpec?.department || 'Board')
+            ),
+            start_date: item.start_date || null,
+            deadline: item.deadline || null,
+          })
+          .select('*')
+          .single();
+
+        if (!tErr && createdTask) {
+          createdTasksCount++;
+          await syncTaskToOutlook(createdTask as TaskItem);
+        }
+      }
+
+      for (const pid of touchedProjectIds) {
+        await recalculateProjectProgress(pid);
+      }
+
+      return NextResponse.json({
+        ok: true,
+        projectId: targetProjectId,
+        createdProjectTitle,
+        createdTasksCount,
+      });
+    }
+
+    // 2D. ACȚIUNI ÎN MASĂ (BATCH) DIN TAB-UL TASK-URI
+    if (action === 'batch_update_tasks') {
+      const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
+      const operation: string = String(body.operation || '');
+      if (ids.length === 0) {
+        return NextResponse.json({ error: 'Niciun task selectat.' }, { status: 400 });
+      }
+
+      const { data: existingTasks } = await supabase
+        .from('tasks')
+        .select('*')
+        .in('id', ids);
+      const list = (existingTasks as TaskItem[]) || [];
+      const affectedProjectIds = new Set<string>(
+        list.map((t) => t.project_id).filter((id): id is string => Boolean(id))
+      );
+
+      if (operation === 'done') {
+        await supabase
+          .from('tasks')
+          .update({ status: 'done', completed_at: new Date().toISOString() })
+          .in('id', ids);
+      } else if (operation === 'today' || operation === 'tomorrow') {
+        const offset = operation === 'tomorrow' ? 86400000 : 0;
+        const targetDate = new Date(Date.now() + offset).toISOString().slice(0, 10);
+        await supabase
+          .from('tasks')
+          .update({ start_date: targetDate, deadline: targetDate })
+          .in('id', ids);
+      } else if (operation === 'pm_sync') {
+        await supabase.from('tasks').update({ needs_pm_sync: true }).in('id', ids);
+      } else if (operation === 'delete') {
+        for (const t of list) {
+          await deleteOutlookEvent(t.outlook_event_id);
+        }
+        await supabase.from('tasks').delete().in('id', ids);
+      } else if (operation === 'group_project') {
+        const projTitle = String(body.projectTitle || 'Proiect Nou').trim();
+        const dept = normalizeDepartment(body.department || list[0]?.department || 'Board');
+        const { data: newProj, error: pErr } = await supabase
+          .from('projects')
+          .insert({
+            title: projTitle,
+            department: dept,
+            status: 'active',
+            progress: 0,
+            is_core_team: Boolean(body.is_core_team),
+            start_date: new Date().toISOString().slice(0, 10),
+          })
+          .select('*')
+          .single();
+
+        if (pErr || !newProj) {
+          return NextResponse.json(
+            { error: pErr?.message || 'Eroare la crearea proiectului.' },
+            { status: 500 }
+          );
+        }
+        await supabase.from('tasks').update({ project_id: newProj.id }).in('id', ids);
+        affectedProjectIds.add(newProj.id);
+      }
+
+      for (const pid of affectedProjectIds) {
+        await recalculateProjectProgress(pid);
+      }
+
       return NextResponse.json({ ok: true });
     }
 
@@ -668,7 +903,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    // 5. NOTIȚE PER PROIECT & NOTIȚE GENERALE (CREARE + EDITARE + ȘTERGERE)
+    // 5. NOTIȚE PER PROIECT & NOTIȚE GENERALE
     if (action === 'create_project_note') {
       const { error } = await supabase.from('project_notes').insert({
         project_id: body.project_id,
@@ -745,7 +980,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    // 6. POST-IT NOTES (CREARE + EDITARE + ȘTERGERE)
+    // 6. POST-IT NOTES
     if (action === 'create_post_it') {
       const { error } = await supabase.from('post_it_notes').insert({
         content: String(body.content || '').trim(),

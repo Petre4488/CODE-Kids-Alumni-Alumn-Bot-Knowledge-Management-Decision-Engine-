@@ -123,6 +123,7 @@ export function WorkspaceView({
   const [periodOffset, setPeriodOffset] = useState<number>(0);
   const [expandedProjectIds, setExpandedProjectIds] = useState<Record<string, boolean>>({});
   const [expandedTaskIds, setExpandedTaskIds] = useState<Record<string, boolean>>({});
+  const [standaloneExpanded, setStandaloneExpanded] = useState<boolean>(true);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [inspectedColKey, setInspectedColKey] = useState<string | null>(null);
   const [copiedSummary, setCopiedSummary] = useState(false);
@@ -135,6 +136,14 @@ export function WorkspaceView({
   const [inlineStart, setInlineStart] = useState<string | null>(null);
   const [inlineEnd, setInlineEnd] = useState<string | null>(null);
 
+  // Creare inline task ad-hoc (fără proiect) în Timeline
+  const [inlineAdhocOpen, setInlineAdhocOpen] = useState(false);
+  const [adhocTitle, setAdhocTitle] = useState('');
+  const [adhocDept, setAdhocDept] = useState<DepartmentKey>('Board');
+  const [adhocAssigneeId, setAdhocAssigneeId] = useState<string | null>(null);
+  const [adhocStart, setAdhocStart] = useState<string | null>(null);
+  const [adhocEnd, setAdhocEnd] = useState<string | null>(null);
+
   // Formular Proiect Nou
   const [showNewProject, setShowNewProject] = useState(false);
   const [projTitle, setProjTitle] = useState('');
@@ -144,7 +153,7 @@ export function WorkspaceView({
   const [projDeadline, setProjDeadline] = useState<string | null>(null);
   const [projIsCoreTeam, setProjIsCoreTeam] = useState<boolean>(false);
 
-  // State-uri pentru Project Side Drawer (editare completă + task-uri)
+  // State-uri pentru Project Side Drawer
   const [drawerTitle, setDrawerTitle] = useState('');
   const [drawerDesc, setDrawerDesc] = useState('');
   const [drawerDept, setDrawerDept] = useState<DepartmentKey>('Tehnic');
@@ -190,6 +199,7 @@ export function WorkspaceView({
   useEffect(() => {
     if (selectedDepartment) {
       setProjDept(selectedDepartment);
+      setAdhocDept(selectedDepartment);
     }
   }, [selectedDepartment]);
 
@@ -334,16 +344,28 @@ export function WorkspaceView({
 
   const visibleTasks = useMemo(() => {
     return tasks.filter((t) => {
-      if (scopeFilter !== 'all') {
-        if (!t.project_id || !visibleProjectIdSet.has(t.project_id)) return false;
-      }
       if (effectiveDept && t.department !== effectiveDept) return false;
       if (effectiveProject && t.project_id !== effectiveProject) return false;
       if (filterAssignee && t.assignee_id !== filterAssignee) return false;
       if (onlyMine && !t.is_my_task) return false;
+
+      if (scopeFilter !== 'all') {
+        if (t.project_id) {
+          if (!visibleProjectIdSet.has(t.project_id)) return false;
+        } else {
+          // Task-uri ad-hoc (fără proiect): cele marcate ale tale intră la Core Team, restul la Alumni
+          if (scopeFilter === 'core_team' && !t.is_my_task) return false;
+          if (scopeFilter === 'alumni' && t.is_my_task) return false;
+        }
+      }
       return true;
     });
   }, [tasks, scopeFilter, visibleProjectIdSet, effectiveDept, effectiveProject, filterAssignee, onlyMine]);
+
+  const standaloneTasks = useMemo(
+    () => visibleTasks.filter((t) => !t.project_id && !t.parent_task_id),
+    [visibleTasks]
+  );
 
   const columnLoads = useMemo(() => {
     return timelineCols.map((col) => {
@@ -374,7 +396,6 @@ export function WorkspaceView({
   const selectedProject = selectedProjectId ? projectMap.get(selectedProjectId) || null : null;
 
   function openProjectDrawer(project: Project) {
-    setDrawerNeedsPmSync(Boolean(project.needs_pm_sync));
     setSelectedProjectId(project.id);
     setDrawerTitle(project.title);
     setDrawerDesc(project.description || '');
@@ -382,6 +403,7 @@ export function WorkspaceView({
     setDrawerOwnerId(project.owner_id);
     setDrawerStatus(project.status);
     setDrawerIsCoreTeam(Boolean(project.is_core_team));
+    setDrawerNeedsPmSync(Boolean(project.needs_pm_sync));
     setDrawerBlockedByProjectId(project.blocked_by_project_id || null);
     setDrawerStart(project.start_date);
     setDrawerDeadline(project.deadline);
@@ -503,7 +525,6 @@ export function WorkspaceView({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'update_project',
-          needs_pm_sync: drawerNeedsPmSync,
           id: selectedProject.id,
           title: drawerTitle.trim(),
           description: drawerDesc.trim() || null,
@@ -511,6 +532,7 @@ export function WorkspaceView({
           owner_id: drawerOwnerId,
           status: drawerStatus,
           is_core_team: drawerIsCoreTeam,
+          needs_pm_sync: drawerNeedsPmSync,
           blocked_by_project_id: drawerBlockedByProjectId,
           start_date: drawerStart,
           deadline: drawerDeadline,
@@ -565,6 +587,39 @@ export function WorkspaceView({
       setInlineStart(null);
       setInlineEnd(null);
       setInlineProjectId(null);
+      await onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateAdhocTask(e: React.FormEvent) {
+    e.preventDefault();
+    if (!adhocTitle.trim() || busy) return;
+    setBusy(true);
+    try {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'create_task',
+          title: adhocTitle.trim(),
+          type: 'task',
+          project_id: null,
+          department: adhocDept,
+          assignee_id: adhocAssigneeId,
+          is_my_task: scopeFilter === 'core_team',
+          start_date: adhocStart || todayIso,
+          deadline: adhocEnd || adhocStart || todayIso,
+          estimated_hours: 2,
+          priority: 'medium',
+        }),
+      });
+      setAdhocTitle('');
+      setAdhocAssigneeId(null);
+      setAdhocStart(null);
+      setAdhocEnd(null);
+      setInlineAdhocOpen(false);
       await onRefresh();
     } finally {
       setBusy(false);
@@ -680,7 +735,210 @@ export function WorkspaceView({
     : null;
 
   /* =========================================================================
-     HELPER RANDARE RÂND PROIECT + TASK-URI + SUBTASK-URI PE TIMELINE
+     HELPER RANDARE TASK + SUBTASK-URI PE TIMELINE (COMUN PROIECTE & AD-HOC)
+     ========================================================================= */
+  function renderTaskAndSubtasksRows(t: TaskItem, showDeptDot = false) {
+    const subtasks = tasks.filter((st) => st.parent_task_id === t.id);
+    const isTaskExpanded = Boolean(expandedTaskIds[t.id]);
+    const tSpan = computeSpanPct(t.start_date, t.deadline);
+    const assignee = t.assignee_id ? personMap.get(t.assignee_id)?.full_name : null;
+    const prio = PRIORITY_META[t.priority || 'medium'];
+    const deptMeta = DEPARTMENTS[t.department] || DEPARTMENTS.Board;
+    const isBlocked = Boolean(
+      t.blocked_by_id && taskMap.get(t.blocked_by_id)?.status !== 'done'
+    );
+
+    return (
+      <div key={t.id}>
+        <div className="group grid grid-cols-[310px_1fr] items-center border-t border-white/[0.03] text-xs transition hover:bg-white/[0.02]">
+          <div className="flex items-center justify-between gap-2 border-r border-white/[0.06] py-2 pl-8 pr-4">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              {subtasks.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpandedTaskIds((prev) => ({
+                      ...prev,
+                      [t.id]: !prev[t.id],
+                    }))
+                  }
+                  className="text-[10px] text-zinc-500 hover:text-zinc-200"
+                >
+                  {isTaskExpanded ? '▾' : '▸'}
+                </button>
+              ) : (
+                <span className="text-[10px] text-zinc-700">└</span>
+              )}
+
+              <button
+                type="button"
+                onClick={() => onOpenTaskModal(t)}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              >
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    t.type === 'milestone'
+                      ? t.is_milestone_approved
+                        ? 'bg-emerald-400'
+                        : 'bg-amber-400'
+                      : t.status === 'done'
+                        ? 'bg-emerald-500/60'
+                        : prio.dot
+                  }`}
+                />
+                <span
+                  className={`truncate ${
+                    t.status === 'done'
+                      ? 'text-zinc-500 line-through'
+                      : 'text-zinc-300 group-hover:text-white'
+                  }`}
+                >
+                  {isBlocked ? '🔒 ' : ''}
+                  {t.title}
+                </span>
+              </button>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-zinc-500">
+              {t.needs_pm_sync && (
+                <span
+                  title="De discutat cu Vlad (PM)"
+                  className="rounded bg-violet-500/20 px-1 py-0.2 text-[9px] text-violet-300"
+                >
+                  💬 PM
+                </span>
+              )}
+              {showDeptDot && (
+                <span
+                  title={deptMeta.label}
+                  className={`h-1.5 w-1.5 rounded-full ${deptMeta.dotBg}`}
+                />
+              )}
+              {subtasks.length > 0 && (
+                <span className="font-mono">
+                  {subtasks.filter((s) => s.status === 'done').length}/{subtasks.length}
+                </span>
+              )}
+              {assignee && <span>{assignee.split(' ')[0]}</span>}
+            </div>
+          </div>
+
+          <div
+            onClick={() => onOpenTaskModal(t)}
+            className="relative h-8 cursor-pointer"
+          >
+            {/* Weekend Column Backgrounds */}
+            <div
+              className="pointer-events-none absolute inset-0 grid"
+              style={{
+                gridTemplateColumns: `repeat(${Math.max(1, timelineCols.length)}, minmax(0, 1fr))`,
+              }}
+            >
+              {timelineCols.map((col) => (
+                <div
+                  key={`bg-t-${t.id}-${col.key}`}
+                  className={`border-r border-white/[0.02] ${
+                    col.isWeekend ? 'bg-white/[0.015]' : ''
+                  }`}
+                />
+              ))}
+            </div>
+
+            {/* Today Vertical Line */}
+            {todayLinePct !== null && (
+              <div
+                style={{ left: `${todayLinePct}%` }}
+                className="pointer-events-none absolute inset-y-0 z-10 w-px bg-emerald-400/50"
+              />
+            )}
+
+            {tSpan && (
+              <>
+                <div
+                  style={{
+                    left: `${tSpan.leftPct}%`,
+                    width: `${tSpan.widthPct}%`,
+                  }}
+                  className={`absolute top-2 h-4 rounded-md px-2 text-[10px] leading-4 transition ${
+                    t.type === 'milestone'
+                      ? t.is_milestone_approved
+                        ? 'bg-emerald-500/25 text-emerald-200'
+                        : 'bg-amber-500/25 text-amber-200'
+                      : t.status === 'done'
+                        ? 'bg-white/[0.04] text-zinc-500'
+                        : 'bg-white/[0.1] text-zinc-200 group-hover:bg-white/[0.16]'
+                  }`}
+                >
+                  {tSpan.widthPct >= 16 && (
+                    <span className="block truncate">{t.title}</span>
+                  )}
+                </div>
+
+                {tSpan.widthPct < 16 && (
+                  <span
+                    style={{
+                      left: `calc(${Math.min(82, tSpan.leftPct + tSpan.widthPct)}% + 8px)`,
+                    }}
+                    className="pointer-events-none absolute top-2 whitespace-nowrap text-[11px] text-zinc-400"
+                  >
+                    {t.title}
+                    {assignee ? ` · ${assignee.split(' ')[0]}` : ''}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* SUBTASK-URI */}
+        {isTaskExpanded &&
+          subtasks.map((sub) => {
+            const subSpan = computeSpanPct(sub.start_date, sub.deadline);
+            return (
+              <div
+                key={sub.id}
+                onClick={() => onOpenTaskModal(sub)}
+                className="grid cursor-pointer grid-cols-[310px_1fr] items-center border-t border-white/[0.02] text-[11px] hover:bg-white/[0.02]"
+              >
+                <div className="truncate border-r border-white/[0.06] py-1.5 pl-14 pr-4 text-zinc-500">
+                  ↳ {sub.title}
+                </div>
+                <div className="relative h-7">
+                  {todayLinePct !== null && (
+                    <div
+                      style={{ left: `${todayLinePct}%` }}
+                      className="pointer-events-none absolute inset-y-0 z-10 w-px bg-emerald-400/50"
+                    />
+                  )}
+                  {subSpan && (
+                    <>
+                      <div
+                        style={{
+                          left: `${subSpan.leftPct}%`,
+                          width: `${subSpan.widthPct}%`,
+                        }}
+                        className="absolute top-2 h-3 rounded bg-white/[0.06]"
+                      />
+                      <span
+                        style={{
+                          left: `calc(${Math.min(82, subSpan.leftPct + subSpan.widthPct)}% + 8px)`,
+                        }}
+                        className="pointer-events-none absolute top-1.5 whitespace-nowrap text-[10px] text-zinc-500"
+                      >
+                        {sub.title}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+      </div>
+    );
+  }
+
+  /* =========================================================================
+     HELPER RANDARE RÂND PROIECT + TASK-URILE LUI PE TIMELINE
      ========================================================================= */
   function renderProjectTimelineRows(proj: Project) {
     const meta = DEPARTMENTS[proj.department] || DEPARTMENTS.Board;
@@ -703,7 +961,6 @@ export function WorkspaceView({
           proj.is_core_team ? 'bg-amber-500/[0.015]' : ''
         }`}
       >
-        {/* NIVEL 1: PROIECT */}
         <div className="group grid grid-cols-[310px_1fr] items-center transition hover:bg-white/[0.025]">
           <div className="flex items-center justify-between gap-2 border-r border-white/[0.06] px-4 py-3 text-xs">
             <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -721,10 +978,7 @@ export function WorkspaceView({
               </button>
 
               {proj.is_core_team ? (
-                <span
-                  title="Core Team Project"
-                  className="shrink-0 text-[11px] text-amber-400"
-                >
+                <span title="Core Team Project" className="shrink-0 text-[11px] text-amber-400">
                   ✦
                 </span>
               ) : (
@@ -740,6 +994,14 @@ export function WorkspaceView({
                   <span className="truncate font-medium text-zinc-100 group-hover:text-white">
                     {proj.title}
                   </span>
+                  {proj.needs_pm_sync && (
+                    <span
+                      title="De discutat cu Vlad (PM)"
+                      className="shrink-0 rounded bg-violet-500/20 px-1 py-0.2 text-[9px] text-violet-300"
+                    >
+                      💬 PM
+                    </span>
+                  )}
                   {isProjectBlocked && (
                     <span title="Proiect blocat de alt proiect" className="text-[10px]">
                       🔒
@@ -768,12 +1030,10 @@ export function WorkspaceView({
             </div>
           </div>
 
-          {/* Canvas Bară Proiect (Linear / Notion Timeline Style) */}
           <div
             onClick={() => openProjectDrawer(proj)}
             className="relative h-12 cursor-pointer"
           >
-            {/* Weekend Column Backgrounds */}
             <div
               className="pointer-events-none absolute inset-0 grid"
               style={{
@@ -790,7 +1050,6 @@ export function WorkspaceView({
               ))}
             </div>
 
-            {/* Full-height Today Vertical Line */}
             {todayLinePct !== null && (
               <div
                 style={{ left: `${todayLinePct}%` }}
@@ -871,7 +1130,9 @@ export function WorkspaceView({
           >
             <select
               value={inlineTaskType}
-              onChange={(e) => setInlineTaskType(e.target.value as 'task' | 'milestone')}
+              onChange={(e) =>
+                setInlineTaskType(e.target.value as 'task' | 'milestone')
+              }
               className="rounded-lg border border-white/[0.08] bg-[#0F1014] px-2 py-1 text-zinc-200"
             >
               <option value="task">Task</option>
@@ -891,6 +1152,7 @@ export function WorkspaceView({
               tasks={tasks}
               value={inlineAssigneeId}
               onChange={setInlineAssigneeId}
+              onPersonCreated={onRefresh}
               placeholder="Responsabil..."
             />
             <CalendarRangePicker
@@ -920,192 +1182,8 @@ export function WorkspaceView({
           </form>
         )}
 
-        {/* NIVEL 2: TASK-URI */}
-        {isExpanded &&
-          rootTasks.map((t) => {
-            const subtasks = tasks.filter((st) => st.parent_task_id === t.id);
-            const isTaskExpanded = Boolean(expandedTaskIds[t.id]);
-            const tSpan = computeSpanPct(t.start_date, t.deadline);
-            const assignee = t.assignee_id ? personMap.get(t.assignee_id)?.full_name : null;
-            const prio = PRIORITY_META[t.priority || 'medium'];
-            const isBlocked = Boolean(
-              t.blocked_by_id && taskMap.get(t.blocked_by_id)?.status !== 'done'
-            );
-
-            return (
-              <div key={t.id}>
-                <div className="group grid grid-cols-[310px_1fr] items-center border-t border-white/[0.03] text-xs transition hover:bg-white/[0.02]">
-                  <div className="flex items-center justify-between gap-2 border-r border-white/[0.06] py-2 pl-8 pr-4">
-                    <div className="flex min-w-0 flex-1 items-center gap-2">
-                      {subtasks.length > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setExpandedTaskIds((prev) => ({
-                              ...prev,
-                              [t.id]: !prev[t.id],
-                            }))
-                          }
-                          className="text-[10px] text-zinc-500 hover:text-zinc-200"
-                        >
-                          {isTaskExpanded ? '▾' : '▸'}
-                        </button>
-                      ) : (
-                        <span className="text-[10px] text-zinc-700">└</span>
-                      )}
-
-                      <button
-                        type="button"
-                        onClick={() => onOpenTaskModal(t)}
-                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                      >
-                        <span
-                          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                            t.type === 'milestone'
-                              ? t.is_milestone_approved
-                                ? 'bg-emerald-400'
-                                : 'bg-amber-400'
-                              : t.status === 'done'
-                                ? 'bg-emerald-500/60'
-                                : prio.dot
-                          }`}
-                        />
-                        <span
-                          className={`truncate ${
-                            t.status === 'done'
-                              ? 'text-zinc-500 line-through'
-                              : 'text-zinc-300 group-hover:text-white'
-                          }`}
-                        >
-                          {isBlocked ? '🔒 ' : ''}
-                          {t.title}
-                        </span>
-                      </button>
-                    </div>
-
-                    <div className="flex shrink-0 items-center gap-2 text-[10px] text-zinc-500">
-                      {subtasks.length > 0 && (
-                        <span className="font-mono">
-                          {subtasks.filter((s) => s.status === 'done').length}/{subtasks.length}
-                        </span>
-                      )}
-                      {assignee && <span>{assignee.split(' ')[0]}</span>}
-                    </div>
-                  </div>
-
-                  <div
-                    onClick={() => onOpenTaskModal(t)}
-                    className="relative h-8 cursor-pointer"
-                  >
-                    {/* Weekend Column Backgrounds */}
-                    <div
-                      className="pointer-events-none absolute inset-0 grid"
-                      style={{
-                        gridTemplateColumns: `repeat(${Math.max(1, timelineCols.length)}, minmax(0, 1fr))`,
-                      }}
-                    >
-                      {timelineCols.map((col) => (
-                        <div
-                          key={`bg-t-${t.id}-${col.key}`}
-                          className={`border-r border-white/[0.02] ${
-                            col.isWeekend ? 'bg-white/[0.015]' : ''
-                          }`}
-                        />
-                      ))}
-                    </div>
-
-                    {/* Today Vertical Line */}
-                    {todayLinePct !== null && (
-                      <div
-                        style={{ left: `${todayLinePct}%` }}
-                        className="pointer-events-none absolute inset-y-0 z-10 w-px bg-emerald-400/50"
-                      />
-                    )}
-
-                    {tSpan && (
-                      <>
-                        <div
-                          style={{
-                            left: `${tSpan.leftPct}%`,
-                            width: `${tSpan.widthPct}%`,
-                          }}
-                          className={`absolute top-2 h-4 rounded-md px-2 text-[10px] leading-4 transition ${
-                            t.type === 'milestone'
-                              ? t.is_milestone_approved
-                                ? 'bg-emerald-500/25 text-emerald-200'
-                                : 'bg-amber-500/25 text-amber-200'
-                              : t.status === 'done'
-                                ? 'bg-white/[0.04] text-zinc-500'
-                                : 'bg-white/[0.1] text-zinc-200 group-hover:bg-white/[0.16]'
-                          }`}
-                        >
-                          {tSpan.widthPct >= 16 && (
-                            <span className="block truncate">{t.title}</span>
-                          )}
-                        </div>
-
-                        {tSpan.widthPct < 16 && (
-                          <span
-                            style={{
-                              left: `calc(${Math.min(82, tSpan.leftPct + tSpan.widthPct)}% + 8px)`,
-                            }}
-                            className="pointer-events-none absolute top-2 whitespace-nowrap text-[11px] text-zinc-400"
-                          >
-                            {t.title}
-                            {assignee ? ` · ${assignee.split(' ')[0]}` : ''}
-                          </span>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                {/* NIVEL 3: SUBTASK-URI */}
-                {isTaskExpanded &&
-                  subtasks.map((sub) => {
-                    const subSpan = computeSpanPct(sub.start_date, sub.deadline);
-                    return (
-                      <div
-                        key={sub.id}
-                        onClick={() => onOpenTaskModal(sub)}
-                        className="grid cursor-pointer grid-cols-[310px_1fr] items-center border-t border-white/[0.02] text-[11px] hover:bg-white/[0.02]"
-                      >
-                        <div className="truncate border-r border-white/[0.06] py-1.5 pl-14 pr-4 text-zinc-500">
-                          ↳ {sub.title}
-                        </div>
-                        <div className="relative h-7">
-                          {todayLinePct !== null && (
-                            <div
-                              style={{ left: `${todayLinePct}%` }}
-                              className="pointer-events-none absolute inset-y-0 z-10 w-px bg-emerald-400/50"
-                            />
-                          )}
-                          {subSpan && (
-                            <>
-                              <div
-                                style={{
-                                  left: `${subSpan.leftPct}%`,
-                                  width: `${subSpan.widthPct}%`,
-                                }}
-                                className="absolute top-2 h-3 rounded bg-white/[0.06]"
-                              />
-                              <span
-                                style={{
-                                  left: `calc(${Math.min(82, subSpan.leftPct + subSpan.widthPct)}% + 8px)`,
-                                }}
-                                className="pointer-events-none absolute top-1.5 whitespace-nowrap text-[10px] text-zinc-500"
-                              >
-                                {sub.title}
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            );
-          })}
+        {/* TASK-URI & SUBTASK-URI */}
+        {isExpanded && rootTasks.map((t) => renderTaskAndSubtasksRows(t, false))}
       </div>
     );
   }
@@ -1120,7 +1198,6 @@ export function WorkspaceView({
     >
       {/* SINGLE UNIFIED ASANA-STYLE WORKSPACE HEADER */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] px-5 py-3">
-        {/* Left: Context Breadcrumb + View Switcher + Scope Toggle */}
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
             {onlyCoreTeamFromNav && !activeDeptMeta ? (
@@ -1171,7 +1248,6 @@ export function WorkspaceView({
 
           <div className="h-4 w-px bg-white/[0.08]" />
 
-          {/* Clean View Switcher */}
           <div className="flex items-center gap-0.5 rounded-xl bg-white/[0.03] p-0.5 text-xs">
             {[
               { id: 'gantt', label: 'Timeline' },
@@ -1194,7 +1270,6 @@ export function WorkspaceView({
             ))}
           </div>
 
-          {/* Scope Switcher: Toate vs Core Team vs Alumni */}
           {!onlyCoreTeamFromNav && !selectedProjectFromNav && (
             <div className="hidden items-center gap-0.5 rounded-xl bg-white/[0.03] p-0.5 text-[11px] lg:flex">
               {[
@@ -1364,6 +1439,7 @@ export function WorkspaceView({
                     tasks={tasks}
                     value={filterAssignee || null}
                     onChange={(id) => setFilterAssignee(id || '')}
+                    onPersonCreated={onRefresh}
                     placeholder="Caută responsabil..."
                   />
                 </div>
@@ -1415,7 +1491,7 @@ export function WorkspaceView({
         </div>
       </div>
 
-      {/* FORMULAR PROIECT NOU (CU TOGGLE CORE TEAM) */}
+      {/* FORMULAR PROIECT NOU */}
       {showNewProject && (
         <form
           onSubmit={handleCreateProject}
@@ -1454,6 +1530,7 @@ export function WorkspaceView({
               tasks={tasks}
               value={projOwnerId}
               onChange={setProjOwnerId}
+              onPersonCreated={onRefresh}
             />
           </div>
           <div>
@@ -1479,20 +1556,6 @@ export function WorkspaceView({
               <span>✦ Core Team</span>
             </label>
             <button
-                type="button"
-                onClick={() => {
-                  setDrawerNeedsPmSync((v) => !v);
-                  setDrawerDetailsDirty(true);
-                }}
-                className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
-                  drawerNeedsPmSync
-                    ? 'border-violet-400/40 bg-violet-500/20 text-violet-200'
-                    : 'border-white/[0.08] bg-white/[0.03] text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {drawerNeedsPmSync ? '💬 De vorbit cu Vlad (PM)' : '💬 Vlad (PM)'}
-              </button>
-            <button
               type="submit"
               className="rounded-lg bg-zinc-100 px-3.5 py-1.5 font-medium text-zinc-900 hover:bg-white"
             >
@@ -1502,7 +1565,7 @@ export function WorkspaceView({
         </form>
       )}
 
-      {/* 1. MASTER TIMELINE CU SWIMLANES (CORE TEAM VS ALUMNI) */}
+      {/* 1. MASTER TIMELINE CU SWIMLANES (CORE TEAM + ALUMNI + TASK-URI AD-HOC) */}
       {viewMode === 'gantt' && (
         <div className="flex-1 overflow-y-auto">
           {inspectedLoad && showLoadHeatmap && (
@@ -1595,45 +1658,134 @@ export function WorkspaceView({
                 </div>
               )}
 
-              {/* Rânduri Proiecte (grupate vizual între Core Team și Departamente Alumni) */}
-              {visibleProjects.length === 0 ? (
-                <div className="py-16 text-center text-xs text-zinc-500">
-                  Niciun proiect aici încă. Apasă <strong>+ Proiect</strong> în dreapta sus.
-                </div>
-              ) : (
-                <>
-                  {/* SWIMLANE 1: CORE TEAM (PROIECTELE MELE / NUCLEU) */}
-                  {coreTeamProjects.length > 0 && (
-                    <div>
-                      {scopeFilter === 'all' && !selectedProjectFromNav && (
-                        <div className="flex items-center justify-between border-b border-amber-500/15 bg-amber-500/[0.05] px-5 py-1.5 text-[11px]">
-                          <span className="font-medium text-amber-300">
-                            ✦ Core Team · Proiecte coordonate direct ({coreTeamProjects.length})
-                          </span>
-                          <span className="text-amber-300/60">Nucleu &amp; Management</span>
-                        </div>
-                      )}
-                      {coreTeamProjects.map((proj) => renderProjectTimelineRows(proj))}
+              {/* SWIMLANE 1: CORE TEAM */}
+              {coreTeamProjects.length > 0 && (
+                <div>
+                  {scopeFilter === 'all' && !selectedProjectFromNav && (
+                    <div className="flex items-center justify-between border-b border-amber-500/15 bg-amber-500/[0.05] px-5 py-1.5 text-[11px]">
+                      <span className="font-medium text-amber-300">
+                        ✦ Core Team · Proiecte coordonate direct ({coreTeamProjects.length})
+                      </span>
+                      <span className="text-amber-300/60">Nucleu &amp; Management</span>
                     </div>
+                  )}
+                  {coreTeamProjects.map((proj) => renderProjectTimelineRows(proj))}
+                </div>
+              )}
+
+              {/* SWIMLANE 2: PROIECTE DEPARTAMENTE ALUMNI */}
+              {alumniProjects.length > 0 && (
+                <div>
+                  {scopeFilter === 'all' &&
+                    !selectedProjectFromNav &&
+                    coreTeamProjects.length > 0 && (
+                      <div className="flex items-center justify-between border-y border-white/[0.06] bg-white/[0.02] px-5 py-1.5 text-[11px]">
+                        <span className="font-medium text-zinc-300">
+                          ◎ Proiecte Departamente Alumni ({alumniProjects.length})
+                        </span>
+                        <span className="text-zinc-500">Inițiative pe departamente</span>
+                      </div>
+                    )}
+                  {alumniProjects.map((proj) => renderProjectTimelineRows(proj))}
+                </div>
+              )}
+
+              {/* SWIMLANE 3: TASK-URI AD-HOC / FĂRĂ PROIECT */}
+              {!selectedProjectFromNav && (
+                <div className="border-t border-white/[0.06]">
+                  <div className="flex items-center justify-between bg-white/[0.02] px-5 py-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setStandaloneExpanded((e) => !e)}
+                      className="flex items-center gap-2 font-medium text-zinc-300 hover:text-white"
+                    >
+                      <span className="text-zinc-500">{standaloneExpanded ? '▾' : '▸'}</span>
+                      <span>⚡ Task-uri Ad-hoc / Fără proiect ({standaloneTasks.length})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInlineAdhocOpen((o) => !o);
+                        setStandaloneExpanded(true);
+                      }}
+                      className="rounded-md bg-white/[0.06] px-2.5 py-0.5 text-[11px] text-zinc-300 transition hover:bg-white/[0.12] hover:text-white"
+                    >
+                      + Task ad-hoc
+                    </button>
+                  </div>
+
+                  {inlineAdhocOpen && (
+                    <form
+                      onSubmit={handleCreateAdhocTask}
+                      className="grid gap-2 border-t border-white/[0.05] bg-[#14161C] px-8 py-2.5 text-xs sm:grid-cols-[1fr_150px_185px_185px_auto]"
+                    >
+                      <input
+                        type="text"
+                        autoFocus
+                        required
+                        value={adhocTitle}
+                        onChange={(e) => setAdhocTitle(e.target.value)}
+                        placeholder="Task rapid fără proiect (ex: Sunat partener, verificat formular)..."
+                        className="rounded-lg border border-white/[0.08] bg-[#0F1014] px-2.5 py-1 text-zinc-100 focus:outline-none"
+                      />
+                      <select
+                        value={adhocDept}
+                        onChange={(e) => setAdhocDept(e.target.value as DepartmentKey)}
+                        className="rounded-lg border border-white/[0.08] bg-[#0F1014] px-2 py-1 text-zinc-200"
+                      >
+                        {(Object.keys(DEPARTMENTS) as DepartmentKey[]).map((k) => (
+                          <option key={k} value={k}>
+                            {DEPARTMENTS[k].label}
+                          </option>
+                        ))}
+                      </select>
+                      <AlumniSearchPicker
+                        people={people}
+                        tasks={tasks}
+                        value={adhocAssigneeId}
+                        onChange={setAdhocAssigneeId}
+                        onPersonCreated={onRefresh}
+                        placeholder="Responsabil..."
+                      />
+                      <CalendarRangePicker
+                        startDate={adhocStart}
+                        endDate={adhocEnd}
+                        onChange={(s, e) => {
+                          setAdhocStart(s);
+                          setAdhocEnd(e);
+                        }}
+                        alignRight
+                      />
+                      <div className="flex gap-1">
+                        <button
+                          type="submit"
+                          className="rounded-lg bg-zinc-100 px-3 py-1 font-medium text-zinc-900 hover:bg-white"
+                        >
+                          Adaugă
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setInlineAdhocOpen(false)}
+                          className="rounded-lg px-2 py-1 text-zinc-500 hover:text-zinc-200"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </form>
                   )}
 
-                  {/* SWIMLANE 2: PROIECTE DEPARTAMENTE ALUMNI */}
-                  {alumniProjects.length > 0 && (
-                    <div>
-                      {scopeFilter === 'all' &&
-                        !selectedProjectFromNav &&
-                        coreTeamProjects.length > 0 && (
-                          <div className="flex items-center justify-between border-y border-white/[0.06] bg-white/[0.02] px-5 py-1.5 text-[11px]">
-                            <span className="font-medium text-zinc-300">
-                              ◎ Proiecte Departamente Alumni ({alumniProjects.length})
-                            </span>
-                            <span className="text-zinc-500">Inițiative pe departamente</span>
-                          </div>
-                        )}
-                      {alumniProjects.map((proj) => renderProjectTimelineRows(proj))}
-                    </div>
-                  )}
-                </>
+                  {standaloneExpanded &&
+                    (standaloneTasks.length === 0 ? (
+                      <div className="px-8 py-4 text-[11px] text-zinc-600">
+                        Niciun task fără proiect în acest filtru. Poți crea unul rapid cu{' '}
+                        <strong>+ Task ad-hoc</strong> sau promova orice task la proiect din
+                        detaliile lui.
+                      </div>
+                    ) : (
+                      standaloneTasks.map((t) => renderTaskAndSubtasksRows(t, true))
+                    ))}
+                </div>
               )}
             </div>
           </div>
@@ -1696,12 +1848,11 @@ export function WorkspaceView({
 
                           <p className="mt-2 font-medium text-zinc-100">{t.title}</p>
 
-                          {proj && (
-                            <p className="mt-1 truncate text-[11px] text-zinc-500">
-                              {proj.is_core_team ? '✦ ' : ''}
-                              {proj.title}
-                            </p>
-                          )}
+                          <p className="mt-1 truncate text-[11px] text-zinc-500">
+                            {proj
+                              ? `${proj.is_core_team ? '✦ ' : ''}${proj.title}`
+                              : '⚡ Task ad-hoc'}
+                          </p>
 
                           <div className="mt-3 flex items-center justify-between text-[11px] text-zinc-500">
                             <span>{assignee ? assignee.full_name : 'Nealocat'}</span>
@@ -1879,7 +2030,7 @@ export function WorkspaceView({
                         </span>
                       </td>
                       <td className="px-4 py-2.5 text-zinc-500">
-                        {t.project_id ? projectMap.get(t.project_id)?.title || '-' : 'Individual'}
+                        {t.project_id ? projectMap.get(t.project_id)?.title || '-' : '⚡ Ad-hoc'}
                       </td>
                       <td className="px-4 py-2.5">
                         <span className={`text-[11px] ${prio.badgeText}`}>{prio.label}</span>
@@ -1900,13 +2051,10 @@ export function WorkspaceView({
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* PROJECT DETAIL SIDE DRAWER (COMPLET: DESCRIERE, RESPO, DEPT, TASK-URI) */}
-      {/* ===================================================================== */}
+      {/* PROJECT DETAIL SIDE DRAWER */}
       {selectedProject && (
         <div className="fixed inset-y-3 right-3 z-40 flex w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/[0.1] bg-[#15171D] shadow-2xl">
-          {/* Top Header */}
-          <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] px-5 py-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] px-5 py-3.5">
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -1921,6 +2069,21 @@ export function WorkspaceView({
                 }`}
               >
                 {drawerIsCoreTeam ? '✦ Core Team' : '◎ Alumni Dept'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setDrawerNeedsPmSync((v) => !v);
+                  setDrawerDetailsDirty(true);
+                }}
+                className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
+                  drawerNeedsPmSync
+                    ? 'border-violet-400/40 bg-violet-500/20 text-violet-200'
+                    : 'border-white/[0.08] bg-white/[0.03] text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {drawerNeedsPmSync ? '💬 De vorbit cu Vlad (PM)' : '💬 Vlad (PM)'}
               </button>
 
               <span className="font-mono text-xs font-semibold text-emerald-400">
@@ -1948,7 +2111,6 @@ export function WorkspaceView({
                 type="button"
                 onClick={() => handleDeleteProject(selectedProject.id)}
                 className="rounded-lg border border-rose-500/20 px-2 py-1 text-xs text-rose-400 hover:bg-rose-500/15"
-                title="Șterge proiect"
               >
                 Șterge
               </button>
@@ -1962,9 +2124,7 @@ export function WorkspaceView({
             </div>
           </div>
 
-          {/* Scrollable Body */}
           <div className="flex-1 space-y-5 overflow-y-auto p-5 text-xs">
-            {/* 1. Titlu & Descriere */}
             <div className="space-y-2.5">
               <input
                 type="text"
@@ -1988,7 +2148,6 @@ export function WorkspaceView({
               />
             </div>
 
-            {/* 2. Metadate: Responsabil (+ departamentul lui), Departament proiect, Interval, Status, Dependencies */}
             <div className="grid gap-3 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block text-[11px] text-zinc-500">
@@ -2002,6 +2161,7 @@ export function WorkspaceView({
                     setDrawerOwnerId(id);
                     setDrawerDetailsDirty(true);
                   }}
+                  onPersonCreated={onRefresh}
                 />
                 {drawerOwnerId && personMap.get(drawerOwnerId) && (
                   <p className="mt-1 text-[10px] text-zinc-400">
@@ -2103,7 +2263,6 @@ export function WorkspaceView({
               )}
             </div>
 
-            {/* 3. Progres Automat */}
             {(() => {
               const projItems = tasks.filter(
                 (t) => t.project_id === selectedProject.id && !t.parent_task_id
@@ -2139,7 +2298,6 @@ export function WorkspaceView({
               );
             })()}
 
-            {/* 4. Task-uri & Milestone-uri sub acest proiect (clickabile direct de aici) */}
             <div className="space-y-2.5 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4">
               <div className="flex items-center justify-between">
                 <h4 className="font-medium text-zinc-200">
@@ -2188,6 +2346,7 @@ export function WorkspaceView({
                       tasks={tasks}
                       value={drawerNewTaskAssignee}
                       onChange={setDrawerNewTaskAssignee}
+                      onPersonCreated={onRefresh}
                       placeholder="Responsabil..."
                     />
                     <CalendarRangePicker
@@ -2303,7 +2462,6 @@ export function WorkspaceView({
               </div>
             </div>
 
-            {/* 5. Update-uri & Notițe Proiect */}
             <div className="space-y-3">
               <h4 className="font-medium text-zinc-300">Update-uri &amp; Notițe Proiect</h4>
               <form onSubmit={addProjectNote} className="space-y-2">

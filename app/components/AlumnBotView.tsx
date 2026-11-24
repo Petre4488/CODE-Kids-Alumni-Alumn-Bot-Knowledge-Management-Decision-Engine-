@@ -4,6 +4,8 @@ import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { StatsChart } from './StatsChart';
 import { THINKING_MODES, ThinkingMode } from '../lib/model-router';
+import { DEPARTMENTS, DepartmentKey, Person, Project } from '../lib/pmp-types';
+import type { AiActionPlan, AiProposedTask } from '../api/ask/route';
 
 const ExcalidrawDiagram = dynamic(
   () => import('./ExcalidrawDiagram').then((mod) => mod.ExcalidrawDiagram),
@@ -52,6 +54,9 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   noteProposal?: string | null;
+  actionPlan?: AiActionPlan | null;
+  planApproved?: boolean;
+  planResultText?: string;
   questionAsked?: string;
   usedWeb?: boolean;
   sources?: SourceDoc[];
@@ -104,7 +109,7 @@ const STARTER_QUESTIONS = [
   'Fă-mi un status update live pe toate departamentele și proiectele active.',
   'Cine din baza de date CRM are skill-uri tehnice sau de organizare și e disponibil?',
   'Care sunt pașii și condițiile pentru alegerea sau demiterea board-ului?',
-  'Ce noutăți aduce Ghidul Operațional 2027 față de 2026?',
+  'Adaugă task-ul de a crea agenda pentru ședința de Board și propune pașii necesari.',
 ];
 
 function extractTag(rawContent: string, tagName: string): {
@@ -121,13 +126,16 @@ function extractTag(rawContent: string, tagName: string): {
 }
 
 function renderMessageContent(content: string) {
-  const regex = /```(mermaid|chart)\s*([\s\S]*?)```/g;
+  // Ignoră mențiunile goale de tip ```chart``` sau ```mermaid``` din propoziții
+  const sanitized = content.replace(/```(mermaid|chart)\s*```/gi, '`$1`');
+
+  const regex = /```(mermaid|chart)\r?\n([\s\S]*?)```/gi;
   const elements: React.ReactNode[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = regex.exec(content)) !== null) {
-    const textBefore = content.slice(lastIndex, match.index);
+  while ((match = regex.exec(sanitized)) !== null) {
+    const textBefore = sanitized.slice(lastIndex, match.index);
     if (textBefore.trim()) {
       elements.push(
         <div key={`txt-${lastIndex}`} className="whitespace-pre-wrap">
@@ -136,19 +144,19 @@ function renderMessageContent(content: string) {
       );
     }
 
-    const blockType = match[1];
-    const blockBody = match[2];
+    const blockType = match[1].toLowerCase();
+    const blockBody = match[2].trim();
 
-    if (blockType === 'mermaid') {
+    if (blockType === 'mermaid' && blockBody) {
       elements.push(<ExcalidrawDiagram key={`exc-${match.index}`} chart={blockBody} />);
-    } else if (blockType === 'chart') {
+    } else if (blockType === 'chart' && blockBody) {
       elements.push(<StatsChart key={`cht-${match.index}`} rawJson={blockBody} />);
     }
 
     lastIndex = regex.lastIndex;
   }
 
-  const remaining = content.slice(lastIndex);
+  const remaining = sanitized.slice(lastIndex);
   if (remaining.trim()) {
     elements.push(
       <div key={`txt-${lastIndex}`} className="whitespace-pre-wrap">
@@ -164,12 +172,22 @@ interface AlumnBotViewProps {
   initialPrompt?: string | null;
   onInitialPromptConsumed?: () => void;
   compactDrawer?: boolean;
+  people?: Person[];
+  projects?: Project[];
+  onDataMutated?: () => Promise<void>;
+  onNavigateTab?: (
+    tab: 'dashboard' | 'tasks' | 'workspace' | 'crm' | 'notes' | 'ai'
+  ) => void;
 }
 
 export function AlumnBotView({
   initialPrompt,
   onInitialPromptConsumed,
   compactDrawer = false,
+  people = [],
+  projects = [],
+  onDataMutated,
+  onNavigateTab,
 }: AlumnBotViewProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -193,6 +211,7 @@ export function AlumnBotView({
 
   const [savedNotes, setSavedNotes] = useState<Record<string, boolean>>({});
   const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
+  const [approvingMsgId, setApprovingMsgId] = useState<string | null>(null);
 
   const [sessionStats, setSessionStats] = useState({ totalTokens: 0, totalCostUsd: 0 });
   const [allTimeStats, setAllTimeStats] = useState({
@@ -221,20 +240,20 @@ export function AlumnBotView({
       .catch(() => {});
   }, []);
 
-    useEffect(() => {
-        if (!initialPrompt) {
-        lastConsumedPromptRef.current = null;
-        return;
-        }
-        if (lastConsumedPromptRef.current === initialPrompt || isSubmittingRef.current) {
-        return;
-        }
+  useEffect(() => {
+    if (!initialPrompt) {
+      lastConsumedPromptRef.current = null;
+      return;
+    }
+    if (lastConsumedPromptRef.current === initialPrompt || isSubmittingRef.current) {
+      return;
+    }
 
-        lastConsumedPromptRef.current = initialPrompt;
-        sendQuestion(initialPrompt);
-        onInitialPromptConsumed?.();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [initialPrompt]);
+    lastConsumedPromptRef.current = initialPrompt;
+    sendQuestion(initialPrompt);
+    onInitialPromptConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPrompt]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -291,6 +310,7 @@ export function AlumnBotView({
       }
     } finally {
       isSubmittingRef.current = false;
+      setLoadingSessionId(null);
       setLoading(false);
     }
   }
@@ -356,6 +376,72 @@ export function AlumnBotView({
       }
     } finally {
       setSavingNoteId(null);
+    }
+  }
+
+  function updateMessagePlan(
+    msgId: string,
+    updater: (plan: AiActionPlan) => AiActionPlan
+  ) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId && m.actionPlan ? { ...m, actionPlan: updater(m.actionPlan) } : m
+      )
+    );
+  }
+
+  function updatePlanTask(
+    msgId: string,
+    taskId: string,
+    patch: Partial<AiProposedTask>
+  ) {
+    updateMessagePlan(msgId, (plan) => ({
+      ...plan,
+      tasks: plan.tasks.map((t) => (t.id === taskId ? { ...t, ...patch } : t)),
+    }));
+  }
+
+  async function handleApprovePlan(msg: Message) {
+    if (!msg.actionPlan || approvingMsgId) return;
+    const selectedTasks = msg.actionPlan.tasks.filter((t) => t.selected);
+    if (selectedTasks.length === 0 && msg.actionPlan.project.mode !== 'new') return;
+
+    setApprovingMsgId(msg.id);
+    try {
+      const res = await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'execute_ai_plan',
+          project: msg.actionPlan.project,
+          tasks: selectedTasks,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Eroare la salvarea planului.');
+        return;
+      }
+
+      await onDataMutated?.();
+
+      const parts: string[] = [];
+      if (data.createdProjectTitle) parts.push(`proiectul „${data.createdProjectTitle}”`);
+      if (data.createdTasksCount > 0) parts.push(`${data.createdTasksCount} task-uri`);
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msg.id
+            ? {
+                ...m,
+                planApproved: true,
+                planResultText: `✓ Creat: ${parts.join(' + ')}`,
+              }
+            : m
+        )
+      );
+    } finally {
+      setApprovingMsgId(null);
     }
   }
 
@@ -501,43 +587,47 @@ export function AlumnBotView({
     }
   }
 
-    async function sendQuestion(textToSend?: string, forceWeb = false) {
-        const rawText = (textToSend ?? input).trim();
-        if (!rawText || loading || isSubmittingRef.current) return;
-        isSubmittingRef.current = true;
-
-    const triggerWeb = forceWeb || webMode || /^\/web\b/i.test(rawText);
-    const cleanPrompt = rawText.replace(/^\/web\b\s*/i, '').trim() || rawText;
-
-    if (decisionMode) {
-      if (!textToSend) setInput('');
-      setActiveSessionId(null);
-      setDecisionSession(null);
-      await runDecisionStep({
-        topic: cleanPrompt,
-        step: 0,
-        maxIter: maxIterations,
-        useWeb: triggerWeb,
-      });
-      return;
-    }
-
-    const displayQuestion =
-      triggerWeb && !/^\/web\b/i.test(rawText) ? `/web ${rawText}` : rawText;
-
-    const userMsg: Message = {
-      id: crypto.randomUUID(),
-      role: 'user',
-      content: displayQuestion,
-      usedWeb: triggerWeb,
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-    if (!textToSend) setInput('');
-    setWebMode(false);
-    setLoading(true);
+  async function sendQuestion(
+    textToSend?: string,
+    forceWeb = false,
+    forceChatMode = false
+  ) {
+    const rawText = (textToSend ?? input).trim();
+    if (!rawText || loading || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
 
     try {
+      const triggerWeb = forceWeb || webMode || /^\/web\b/i.test(rawText);
+      const cleanPrompt = rawText.replace(/^\/web\b\s*/i, '').trim() || rawText;
+
+      if (decisionMode && !forceChatMode) {
+        if (!textToSend) setInput('');
+        setActiveSessionId(null);
+        setDecisionSession(null);
+        await runDecisionStep({
+          topic: cleanPrompt,
+          step: 0,
+          maxIter: maxIterations,
+          useWeb: triggerWeb,
+        });
+        return;
+      }
+
+      const displayQuestion =
+        triggerWeb && !/^\/web\b/i.test(rawText) ? `/web ${rawText}` : rawText;
+
+      const userMsg: Message = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: displayQuestion,
+        usedWeb: triggerWeb,
+      };
+
+      setMessages((prev) => [...prev, userMsg]);
+      if (!textToSend) setInput('');
+      setWebMode(false);
+      setLoading(true);
+
       const history = messages.map((m) => ({ role: m.role, content: m.content }));
 
       const res = await fetch('/api/ask', {
@@ -563,6 +653,7 @@ export function AlumnBotView({
         role: 'assistant',
         content: cleanContent,
         noteProposal: extracted,
+        actionPlan: data.actionPlan || null,
         questionAsked: cleanPrompt,
         usedWeb: triggerWeb,
         sources: data.sources,
@@ -623,8 +714,22 @@ export function AlumnBotView({
         { id: crypto.randomUUID(), role: 'assistant', content: `⚠️ Eroare: ${errMsg}` },
       ]);
     } finally {
+      isSubmittingRef.current = false;
       setLoading(false);
     }
+  }
+
+  function convertDecisionToTasks(topic: string, summary: string) {
+    setDecisionSession(null);
+    setDecisionMode(false);
+    setActiveSessionId(null);
+    setMessages([]);
+    setThinkingMode('analytic');
+    sendQuestion(
+      `Transformă această decizie aprobată în proiectul potrivit și task-urile concrete cu responsabili și termene (generează planul spre aprobare): ${topic}\n\nRezumat decizie:\n${summary}`,
+      false,
+      true
+    );
   }
 
   const activeModeMeta = THINKING_MODES[thinkingMode];
@@ -788,8 +893,9 @@ export function AlumnBotView({
                     Alumn-Bot · Conectat la Documente + CRM Live
                   </h2>
                   <p className="text-xs text-zinc-400">
-                    Poți cere status update-uri live, interoga baza de date CRM, genera diagrame
-                    Excalidraw / grafice sau rula sesiuni iterative de decizie.
+                    Poți cere status update-uri live, genera diagrame Excalidraw / grafice, rula
+                    sesiuni iterative de decizie offline pe fișierele tale sau aproba direct
+                    proiecte și task-uri.
                   </p>
                 </div>
 
@@ -819,13 +925,277 @@ export function AlumnBotView({
                     className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                   >
                     <div
-                      className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                      className={`max-w-[90%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                         msg.role === 'user'
                           ? 'bg-emerald-600 text-white'
                           : 'border border-zinc-800 bg-zinc-900 text-zinc-100'
                       }`}
                     >
                       <div>{renderMessageContent(msg.content)}</div>
+
+                      {/* CARD APROBARE PROIECT & TASK-URI (PMP ACTION PLAN) */}
+                      {msg.actionPlan && (
+                        <div className="mt-3 overflow-hidden rounded-xl border border-emerald-500/30 bg-zinc-950 text-xs">
+                          <div className="flex items-center justify-between border-b border-zinc-800 bg-emerald-500/10 px-3.5 py-2">
+                            <span className="font-semibold text-emerald-300">
+                              ✦ {msg.actionPlan.summary}
+                            </span>
+                            <span className="font-mono text-[10px] text-zinc-400">
+                              {msg.actionPlan.tasks.filter((t) => t.selected).length}/
+                              {msg.actionPlan.tasks.length} selectate
+                            </span>
+                          </div>
+
+                          {!msg.planApproved && (
+                            <div className="space-y-2 border-b border-zinc-800 px-3.5 py-2.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-[11px] text-zinc-400">Proiect:</span>
+                                <div className="flex rounded-lg bg-zinc-900 p-0.5 text-[11px]">
+                                  {[
+                                    { id: 'new', label: '+ Nou' },
+                                    { id: 'existing', label: 'Existent' },
+                                    { id: 'none', label: '⚡ Ad-hoc' },
+                                  ].map((opt) => (
+                                    <button
+                                      key={opt.id}
+                                      type="button"
+                                      onClick={() =>
+                                        updateMessagePlan(msg.id, (pl) => ({
+                                          ...pl,
+                                          project: {
+                                            ...pl.project,
+                                            mode: opt.id as 'new' | 'existing' | 'none',
+                                          },
+                                        }))
+                                      }
+                                      className={`rounded px-2 py-0.5 font-medium ${
+                                        msg.actionPlan!.project.mode === opt.id
+                                          ? 'bg-zinc-700 text-white'
+                                          : 'text-zinc-500'
+                                      }`}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {msg.actionPlan.project.mode === 'new' && (
+                                <div className="grid gap-1.5 sm:grid-cols-[1fr_130px_auto]">
+                                  <input
+                                    type="text"
+                                    value={msg.actionPlan.project.title}
+                                    onChange={(e) =>
+                                      updateMessagePlan(msg.id, (pl) => ({
+                                        ...pl,
+                                        project: { ...pl.project, title: e.target.value },
+                                      }))
+                                    }
+                                    placeholder="Titlu proiect nou..."
+                                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-zinc-100"
+                                  />
+                                  <select
+                                    value={msg.actionPlan.project.department}
+                                    onChange={(e) =>
+                                      updateMessagePlan(msg.id, (pl) => ({
+                                        ...pl,
+                                        project: {
+                                          ...pl.project,
+                                          department: e.target.value as DepartmentKey,
+                                        },
+                                      }))
+                                    }
+                                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200"
+                                  >
+                                    {(Object.keys(DEPARTMENTS) as DepartmentKey[]).map((k) => (
+                                      <option key={k} value={k}>
+                                        {DEPARTMENTS[k].label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updateMessagePlan(msg.id, (pl) => ({
+                                        ...pl,
+                                        project: {
+                                          ...pl.project,
+                                          is_core_team: !pl.project.is_core_team,
+                                        },
+                                      }))
+                                    }
+                                    className={`rounded-lg border px-2 py-1 text-[11px] ${
+                                      msg.actionPlan.project.is_core_team
+                                        ? 'border-amber-400/50 bg-amber-500/20 text-amber-200'
+                                        : 'border-zinc-700 text-zinc-400'
+                                    }`}
+                                  >
+                                    ✦ Core
+                                  </button>
+                                </div>
+                              )}
+
+                              {msg.actionPlan.project.mode === 'existing' && (
+                                <select
+                                  value={msg.actionPlan.project.existing_project_id || ''}
+                                  onChange={(e) =>
+                                    updateMessagePlan(msg.id, (pl) => ({
+                                      ...pl,
+                                      project: {
+                                        ...pl.project,
+                                        existing_project_id: e.target.value || null,
+                                      },
+                                    }))
+                                  }
+                                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-zinc-200"
+                                >
+                                  <option value="">Alege proiectul existent...</option>
+                                  {projects.map((p) => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.title} ({DEPARTMENTS[p.department]?.label})
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+                          )}
+
+                          <div className="divide-y divide-zinc-800/80 px-3.5">
+                            {msg.actionPlan.tasks.map((t) => (
+                              <div
+                                key={t.id}
+                                className={`py-2 ${t.selected ? '' : 'opacity-45'}`}
+                              >
+                                <div className="flex items-start gap-2">
+                                  <input
+                                    type="checkbox"
+                                    disabled={Boolean(msg.planApproved)}
+                                    checked={t.selected}
+                                    onChange={(e) =>
+                                      updatePlanTask(msg.id, t.id, {
+                                        selected: e.target.checked,
+                                      })
+                                    }
+                                    className="mt-1 h-3.5 w-3.5 accent-emerald-500"
+                                  />
+                                  <div className="min-w-0 flex-1 space-y-1">
+                                    {msg.planApproved ? (
+                                      <div className="font-medium text-zinc-200">{t.title}</div>
+                                    ) : (
+                                      <input
+                                        type="text"
+                                        value={t.title}
+                                        onChange={(e) =>
+                                          updatePlanTask(msg.id, t.id, {
+                                            title: e.target.value,
+                                          })
+                                        }
+                                        className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-medium text-zinc-100 focus:border-zinc-700 focus:bg-zinc-900 focus:outline-none"
+                                      />
+                                    )}
+                                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-zinc-400">
+                                      {!msg.planApproved && people.length > 0 ? (
+                                        <select
+                                          value={t.assignee_id || ''}
+                                          onChange={(e) => {
+                                            const nextId = e.target.value || null;
+                                            const found = people.find((p) => p.id === nextId);
+                                            updatePlanTask(msg.id, t.id, {
+                                              assignee_id: nextId,
+                                              assignee_name: found?.full_name || null,
+                                            });
+                                          }}
+                                          className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200"
+                                        >
+                                          <option value="">Nealocat</option>
+                                          {people.map((p) => (
+                                            <option key={p.id} value={p.id}>
+                                              {p.full_name} ({p.role})
+                                            </option>
+                                          ))}
+                                        </select>
+                                      ) : (
+                                        <span>👤 {t.assignee_name || 'Nealocat'}</span>
+                                      )}
+                                      <span className="rounded bg-zinc-800 px-1.5 py-0.5">
+                                        {DEPARTMENTS[t.department]?.label || t.department}
+                                      </span>
+                                      {t.deadline && (
+                                        <span className="font-mono">📅 {t.deadline}</span>
+                                      )}
+                                      {!msg.planApproved && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            updatePlanTask(msg.id, t.id, {
+                                              needs_pm_sync: !t.needs_pm_sync,
+                                            })
+                                          }
+                                          className={`rounded px-1.5 py-0.5 ${
+                                            t.needs_pm_sync
+                                              ? 'bg-violet-500/25 text-violet-200'
+                                              : 'bg-zinc-800 text-zinc-500'
+                                          }`}
+                                        >
+                                          💬 Vlad PM
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800 bg-zinc-900/70 px-3.5 py-2">
+                            {msg.planApproved ? (
+                              <>
+                                <span className="font-medium text-emerald-400">
+                                  {msg.planResultText || '✓ Adăugat!'}
+                                </span>
+                                {onNavigateTab && (
+                                  <div className="flex gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => onNavigateTab('tasks')}
+                                      className="rounded bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-700"
+                                    >
+                                      Vezi în Task-uri →
+                                    </button>
+                                    {msg.actionPlan.project.mode !== 'none' && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onNavigateTab('workspace')}
+                                        className="rounded bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-700"
+                                      >
+                                        Proiecte →
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                <span className="text-[11px] text-zinc-500">
+                                  Nu se salvează nimic până nu aprobi
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={approvingMsgId === msg.id}
+                                  onClick={() => handleApprovePlan(msg)}
+                                  className="rounded-lg bg-emerald-600 px-3 py-1 font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+                                >
+                                  {approvingMsgId === msg.id
+                                    ? 'Salvez...'
+                                    : `✓ Aprobă și adaugă (${
+                                        msg.actionPlan.tasks.filter((t) => t.selected).length
+                                      })`}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
 
                       {msg.noteProposal && (
                         <div className="mt-3 rounded-xl border border-violet-500/30 bg-violet-500/10 p-3 text-xs">
@@ -921,7 +1291,7 @@ export function AlumnBotView({
                             {msg.usage.totalTokens.toLocaleString()} tok
                           </span>
                           <span className="text-amber-400/90">
-                            • ${msg.usage.estimatedCostUsd.toFixed(5)}
+                            · ${msg.usage.estimatedCostUsd.toFixed(5)}
                           </span>
                           {msg.modelInfo?.escalatedReason && (
                             <span className="text-sky-400">· ↑ {msg.modelInfo.escalatedReason}</span>
@@ -1071,24 +1441,41 @@ export function AlumnBotView({
                       )}
 
                       {isLastStep && isFinalIteration && (
-                        <div className="flex items-center justify-between rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-xs">
-                          <span className="text-emerald-200">Salvezi decizia în Notes?</span>
-                          {savedNotes[s.id] ? (
-                            <span className="font-semibold text-emerald-400">✓ Salvat</span>
-                          ) : (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-xs">
+                          <span className="text-emerald-200">
+                            Următorul pas după decizie:
+                          </span>
+                          <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
                               onClick={() =>
-                                saveNote(
-                                  s.id,
-                                  s.finalSummary || `Decizie (${decisionSession.topic})`
+                                convertDecisionToTasks(
+                                  decisionSession.topic,
+                                  s.finalSummary || s.aiOutput.slice(0, 1200)
                                 )
                               }
-                              className="rounded-lg bg-emerald-600 px-3 py-1 font-medium text-white"
+                              className="rounded-lg border border-sky-400/40 bg-sky-500/20 px-3 py-1 font-medium text-sky-200 hover:bg-sky-500/30"
                             >
-                              📌 Salvează în Notes
+                              ✦ Generează Proiect & Task-uri
                             </button>
-                          )}
+
+                            {savedNotes[s.id] ? (
+                              <span className="font-semibold text-emerald-400">✓ Salvat</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  saveNote(
+                                    s.id,
+                                    s.finalSummary || `Decizie (${decisionSession.topic})`
+                                  )
+                                }
+                                className="rounded-lg bg-emerald-600 px-3 py-1 font-medium text-white"
+                              >
+                                📌 Salvează în Notes
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1192,7 +1579,7 @@ export function AlumnBotView({
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Întreabă despre proceduri, status live sau baza de date CRM..."
+                placeholder="Întreabă despre proceduri, cere o diagramă sau adaugă task-uri..."
                 disabled={loading}
                 className="min-w-[180px] flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:border-emerald-500 focus:outline-none"
               />

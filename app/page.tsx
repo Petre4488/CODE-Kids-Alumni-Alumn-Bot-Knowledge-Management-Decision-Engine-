@@ -18,13 +18,14 @@ import {
 } from './lib/pmp-types';
 import type { OutlookCalendarEvent } from './lib/outlook-graph';
 import { DashboardView } from './components/DashboardView';
+import { TasksView } from './components/TasksView';
 import { WorkspaceView } from './components/WorkspaceView';
 import { TaskDetailModal } from './components/TaskDetailModal';
 import { AlumnBotView } from './components/AlumnBotView';
 import { CrmExcelImportModal } from './components/CrmExcelImportModal';
 import type { ExtractedActionProposal } from './api/pmp/extract-actions/route';
 
-type MainTab = 'dashboard' | 'workspace' | 'crm' | 'notes' | 'ai';
+type MainTab = 'dashboard' | 'tasks' | 'workspace' | 'crm' | 'notes' | 'ai';
 type CrmSubTab = 'people' | 'resources' | 'events' | 'partners';
 type NotesFilter = 'all' | 'postit' | 'project' | 'general';
 
@@ -417,6 +418,9 @@ export default function AlumniCommandCenter() {
 
   const projectMap = new Map(projects.map((p) => [p.id, p]));
   const coreTeamProjects = projects.filter((p) => p.is_core_team && p.status !== 'completed');
+  const openRootTasksCount = tasks.filter(
+    (t) => !t.parent_task_id && t.status !== 'done'
+  ).length;
 
   const filteredPeople = people.filter((p) => {
     const matchesDept = !crmDeptFilter || p.department === crmDeptFilter;
@@ -435,14 +439,13 @@ export default function AlumniCommandCenter() {
   return (
     <div className="flex h-screen gap-2.5 overflow-hidden bg-[#0B0C0E] p-2.5 text-zinc-100">
       {/* ===================================================================== */}
-      {/* DIA-STYLE FLOATING SIDEBAR (CORE TEAM + DEPARTMENT FOLDERS)           */}
+      {/* DIA-STYLE FLOATING SIDEBAR (TASK-URI + CORE TEAM + FOLDERE DEPT)      */}
       {/* ===================================================================== */}
       <aside
         className={`flex shrink-0 flex-col rounded-2xl border border-white/[0.07] bg-[#13151A] shadow-2xl transition-all duration-200 ${
           navCollapsed ? 'w-14' : 'w-60'
         }`}
       >
-        {/* Top Brand + Collapse */}
         <div className="flex h-12 items-center justify-between px-3.5">
           {!navCollapsed && (
             <div className="flex items-center gap-2">
@@ -488,6 +491,12 @@ export default function AlumniCommandCenter() {
           <nav className="space-y-0.5">
             {[
               { id: 'dashboard', icon: '⌂', label: 'Acasă' },
+              {
+                id: 'tasks',
+                icon: '✓',
+                label: 'Task-uri',
+                badge: openRootTasksCount > 0 ? openRootTasksCount : undefined,
+              },
               { id: 'workspace', icon: '◫', label: 'Toate Proiectele' },
               { id: 'crm', icon: '◎', label: 'Oameni & CRM' },
               {
@@ -599,7 +608,7 @@ export default function AlumniCommandCenter() {
             </div>
           )}
 
-          {/* FOLDERE PE DEPARTAMENTE (AUTO-SINCRONIZATE DIN SUPABASE) */}
+          {/* FOLDERE PE DEPARTAMENTE */}
           {!navCollapsed && (
             <div className="space-y-1 pt-1">
               <div className="px-2.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
@@ -812,6 +821,17 @@ export default function AlumniCommandCenter() {
               onAskAiStatus={triggerAskAi}
               onOpenTaskModal={(t) => setActiveTaskModalId(t.id)}
               onSelectDepartment={(dept) => navigateToDepartmentFolder(dept, null)}
+            />
+          )}
+
+          {activeTab === 'tasks' && (
+            <TasksView
+              people={people}
+              projects={projects}
+              tasks={tasks}
+              onRefresh={loadPmpData}
+              onOpenTaskModal={(t) => setActiveTaskModalId(t.id)}
+              onAskAiContext={triggerAskAi}
             />
           )}
 
@@ -1031,7 +1051,7 @@ export default function AlumniCommandCenter() {
             </div>
           )}
 
-{/* HUB CENTRAL NOTIȚE (POST-IT + PROIECTE + ȘEDINȚE — CU EDITARE & ȘTERGERE) */}
+          {/* HUB CENTRAL NOTIȚE */}
           {activeTab === 'notes' && (
             <div className="mx-auto max-w-5xl space-y-5 px-6 py-6">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3 text-xs">
@@ -1058,7 +1078,6 @@ export default function AlumniCommandCenter() {
                 </div>
               </div>
 
-              {/* Formular Unificat cu Alegere Destinație */}
               <form
                 onSubmit={handleCreateUnifiedNote}
                 className="space-y-3 rounded-2xl border border-white/[0.06] bg-[#15171D] p-4 text-xs"
@@ -1154,9 +1173,7 @@ export default function AlumniCommandCenter() {
                 </div>
               </form>
 
-              {/* Lista Tuturor Notițelor cu Editare & Ștergere */}
               <div className="grid gap-3 sm:grid-cols-2">
-                {/* 1. POST-IT NOTES */}
                 {(notesFilter === 'all' || notesFilter === 'postit') &&
                   postItNotes.map((pi) => {
                     const isEditing = editingNoteKey === `postit-${pi.id}`;
@@ -1231,7 +1248,6 @@ export default function AlumniCommandCenter() {
                     );
                   })}
 
-                {/* 2. PROJECT NOTES */}
                 {(notesFilter === 'all' || notesFilter === 'project') &&
                   projectNotes.map((pn) => {
                     const parentProj = projectMap.get(pn.project_id);
@@ -1329,7 +1345,6 @@ export default function AlumniCommandCenter() {
                     );
                   })}
 
-                {/* 3. GENERAL / MEETING NOTES */}
                 {(notesFilter === 'all' || notesFilter === 'general') &&
                   generalNotes.map((n) => {
                     const isEditing = editingNoteKey === `general-${n.id}`;
@@ -1475,12 +1490,16 @@ export default function AlumniCommandCenter() {
                   })}
               </div>
             </div>
-          )}        
+          )}
 
           {activeTab === 'ai' && (
             <AlumnBotView
               initialPrompt={queuedAiPrompt}
               onInitialPromptConsumed={() => setQueuedAiPrompt(null)}
+              people={people}
+              projects={projects}
+              onDataMutated={loadPmpData}
+              onNavigateTab={(t) => setActiveTab(t)}
             />
           )}
         </div>
@@ -1520,6 +1539,13 @@ export default function AlumniCommandCenter() {
               compactDrawer
               initialPrompt={queuedAiPrompt}
               onInitialPromptConsumed={() => setQueuedAiPrompt(null)}
+              people={people}
+              projects={projects}
+              onDataMutated={loadPmpData}
+              onNavigateTab={(t) => {
+                setAiDrawerOpen(false);
+                setActiveTab(t);
+              }}
             />
           </div>
         </div>

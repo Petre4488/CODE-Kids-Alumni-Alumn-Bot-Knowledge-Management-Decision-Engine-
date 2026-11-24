@@ -3,8 +3,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEPARTMENTS, Person, TaskItem } from '../lib/pmp-types';
 
+function normText(str: string): string {
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+export function isCorePetre(p: Person): boolean {
+  const n = normText(p.full_name);
+  return (
+    (n.includes('circeag') && n.includes('petre')) ||
+    (n.includes('petre') && (p.role === 'Manager' || p.department === 'Board'))
+  );
+}
+
+export function isCoreVlad(p: Person): boolean {
+  const n = normText(p.full_name);
+  return (
+    (n.includes('brinzan') && n.includes('vlad')) ||
+    (n.includes('vlad') && (p.role === 'Monitorizare' || p.department === 'Board'))
+  );
+}
+
 /* =========================================================================
-   1. SEARCHABLE ALUMNI PICKER (CU PETRE & VLAD PINNED SUS + LOAD INDICATOR)
+   1. SEARCHABLE ALUMNI PICKER (CU ICONIȚE SPECIALE PETRE & VLAD)
    ========================================================================= */
 interface AlumniSearchPickerProps {
   people: Person[];
@@ -56,12 +80,12 @@ export function AlumniSearchPicker({
   );
 
   const petreRecord = useMemo(
-    () => people.find((p) => p.full_name.toLowerCase().includes('petre')) || null,
+    () => people.find((p) => isCorePetre(p)) || null,
     [people]
   );
 
   const vladRecord = useMemo(
-    () => people.find((p) => p.full_name.toLowerCase().includes('vlad')) || null,
+    () => people.find((p) => isCoreVlad(p)) || null,
     [people]
   );
 
@@ -101,35 +125,75 @@ export function AlumniSearchPicker({
   }
 
   const filtered = useMemo(() => {
-    const q = query.toLowerCase().trim();
-    if (!q) return people.slice(0, 40);
-    return people
-      .filter(
-        (p) =>
-          p.full_name.toLowerCase().includes(q) ||
-          p.role.toLowerCase().includes(q) ||
-          p.department.toLowerCase().includes(q) ||
-          (p.location || '').toLowerCase().includes(q)
-      )
-      .slice(0, 40);
+    const q = normText(query);
+    const list = !q
+      ? people
+      : people.filter(
+          (p) =>
+            normText(p.full_name).includes(q) ||
+            normText(p.role).includes(q) ||
+            normText(p.department).includes(q) ||
+            normText(p.location || '').includes(q)
+        );
+
+    // Punem Cîrceag Petre și Brinzan Vlad primii în listă
+    const sorted = [...list].sort((a, b) => {
+      const aRank = isCorePetre(a) ? 0 : isCoreVlad(a) ? 1 : 2;
+      const bRank = isCorePetre(b) ? 0 : isCoreVlad(b) ? 1 : 2;
+      if (aRank !== bRank) return aRank - bRank;
+      return a.full_name.localeCompare(b.full_name);
+    });
+
+    return sorted.slice(0, 45);
   }, [people, query]);
+
+  const selectedIsPetre = selectedPerson ? isCorePetre(selectedPerson) : false;
+  const selectedIsVlad = selectedPerson ? isCoreVlad(selectedPerson) : false;
 
   return (
     <div ref={wrapperRef} className="relative">
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="flex w-full items-center justify-between gap-2 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-left text-xs text-zinc-200 transition hover:border-zinc-500"
+        className={`flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-1.5 text-left text-xs transition ${
+          selectedIsPetre
+            ? 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-100'
+            : selectedIsVlad
+              ? 'border-sky-500/40 bg-sky-500/[0.08] text-sky-100'
+              : 'border-zinc-700 bg-zinc-950 text-zinc-200 hover:border-zinc-500'
+        }`}
       >
         {selectedPerson ? (
           <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 font-mono text-[10px] font-bold text-emerald-300">
-              {selectedPerson.full_name.charAt(0)}
+            {selectedIsPetre ? (
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/25 text-[11px] text-emerald-300 ring-1 ring-emerald-400/50">
+                ⚡
+              </span>
+            ) : selectedIsVlad ? (
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-500/25 text-[11px] text-sky-300 ring-1 ring-sky-400/50">
+                🛡️
+              </span>
+            ) : (
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-800 font-mono text-[10px] font-bold text-zinc-300">
+                {selectedPerson.full_name.charAt(0)}
+              </span>
+            )}
+            <span className="truncate font-medium">
+              {selectedIsPetre
+                ? 'Cîrceag Petre (Eu)'
+                : selectedIsVlad
+                  ? 'Brinzan Vlad'
+                  : selectedPerson.full_name}
             </span>
-            <span className="truncate font-medium text-zinc-100">
-              {selectedPerson.full_name}
-            </span>
-            <span className="truncate text-[10px] text-zinc-400">
+            <span
+              className={`truncate text-[10px] ${
+                selectedIsPetre
+                  ? 'text-emerald-300/80'
+                  : selectedIsVlad
+                    ? 'text-sky-300/80'
+                    : 'text-zinc-400'
+              }`}
+            >
               ({selectedPerson.role})
             </span>
           </div>
@@ -151,7 +215,7 @@ export function AlumniSearchPicker({
               className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-emerald-500 focus:outline-none"
             />
 
-            {/* QUICK-SELECT CORE: PETRE & VLAD */}
+            {/* QUICK-SELECT CORE: CÎRCEAG PETRE & BRINZAN VLAD */}
             <div className="mt-2 grid grid-cols-2 gap-1.5">
               <button
                 type="button"
@@ -161,8 +225,8 @@ export function AlumniSearchPicker({
                 }
                 className={`flex items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] font-medium transition ${
                   petreRecord && value === petreRecord.id
-                    ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-200'
-                    : 'border-zinc-700 bg-zinc-950 text-zinc-200 hover:border-emerald-500/40'
+                    ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
+                    : 'border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-300 hover:bg-emerald-500/15'
                 }`}
               >
                 <span>⚡</span>
@@ -177,8 +241,8 @@ export function AlumniSearchPicker({
                 }
                 className={`flex items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] font-medium transition ${
                   vladRecord && value === vladRecord.id
-                    ? 'border-sky-500/50 bg-sky-500/20 text-sky-200'
-                    : 'border-zinc-700 bg-zinc-950 text-zinc-200 hover:border-sky-500/40'
+                    ? 'border-sky-400/60 bg-sky-500/20 text-sky-200'
+                    : 'border-sky-500/25 bg-sky-500/[0.06] text-sky-300 hover:bg-sky-500/15'
                 }`}
               >
                 <span>🛡️</span>
@@ -208,6 +272,8 @@ export function AlumniSearchPicker({
                 const dept = DEPARTMENTS[p.department] || DEPARTMENTS.Comunitati;
                 const load = loadByPerson.get(p.id);
                 const isSelected = p.id === value;
+                const rowIsPetre = isCorePetre(p);
+                const rowIsVlad = isCoreVlad(p);
 
                 return (
                   <button
@@ -221,16 +287,42 @@ export function AlumniSearchPicker({
                     className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
                       isSelected
                         ? 'bg-emerald-500/20 text-emerald-200'
-                        : 'text-zinc-200 hover:bg-zinc-800'
+                        : rowIsPetre
+                          ? 'bg-emerald-500/[0.05] text-emerald-100 hover:bg-emerald-500/15'
+                          : rowIsVlad
+                            ? 'bg-sky-500/[0.05] text-sky-100 hover:bg-sky-500/15'
+                            : 'text-zinc-200 hover:bg-zinc-800'
                     }`}
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium">{p.full_name}</div>
-                      <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
-                        <span>{p.role}</span>
-                        <span>·</span>
-                        <span className={dept.badgeText}>{dept.label}</span>
-                        {p.location && <span>· {p.location}</span>}
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      {rowIsPetre && (
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-[11px] text-emerald-300">
+                          ⚡
+                        </span>
+                      )}
+                      {rowIsVlad && (
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-500/20 text-[11px] text-sky-300">
+                          🛡️
+                        </span>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium">{p.full_name}</div>
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+                          <span
+                            className={
+                              rowIsPetre
+                                ? 'font-semibold text-emerald-300'
+                                : rowIsVlad
+                                  ? 'font-semibold text-sky-300'
+                                  : ''
+                            }
+                          >
+                            {p.role}
+                          </span>
+                          <span>·</span>
+                          <span className={dept.badgeText}>{dept.label}</span>
+                          {p.location && <span>· {p.location}</span>}
+                        </div>
                       </div>
                     </div>
 

@@ -3,7 +3,7 @@ import { AzureOpenAI } from 'openai';
 import { createClient } from '@supabase/supabase-js';
 import { ALUMNI_PM_SYSTEM_PROMPT } from '../../lib/system-prompt';
 import { buildLiveCrmContext } from '../../lib/live-crm-context';
-
+import { DepartmentKey, normalizeDepartment, PriorityKey } from '../../lib/pmp-types';
 import {
   ThinkingMode,
   resolveModelConfig,
@@ -21,6 +21,43 @@ const azure = new AzureOpenAI({
   apiKey: process.env.AZURE_OPENAI_API_KEY!,
   apiVersion: '2025-04-01-preview',
 });
+
+export interface AiProposedTask {
+  id: string;
+  selected: boolean;
+  title: string;
+  description: string | null;
+  type: 'task' | 'milestone';
+  department: DepartmentKey;
+  assignee_id: string | null;
+  assignee_name: string | null;
+  priority: PriorityKey;
+  estimated_hours: number;
+  start_date: string | null;
+  deadline: string | null;
+  is_my_task: boolean;
+  needs_pm_sync: boolean;
+}
+
+export interface AiProposedProject {
+  mode: 'none' | 'existing' | 'new';
+  existing_project_id: string | null;
+  title: string;
+  description: string | null;
+  department: DepartmentKey;
+  owner_id: string | null;
+  owner_name: string | null;
+  is_core_team: boolean;
+  needs_pm_sync: boolean;
+  start_date: string | null;
+  deadline: string | null;
+}
+
+export interface AiActionPlan {
+  summary: string;
+  project: AiProposedProject;
+  tasks: AiProposedTask[];
+}
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -94,6 +131,118 @@ async function searchWeb(query: string): Promise<WebResult[]> {
   }));
 }
 
+function extractAndNormalizeActionPlan(
+  rawText: string,
+  projectsList: { id: string; title: string; department: string; is_core_team: boolean }[],
+  peopleList: { id: string; full_name: string; role: string; department: string }[],
+  fallbackDept: string | null
+): { cleanAnswer: string; actionPlan: AiActionPlan | null } {
+  const regex = /```pmp_plan\s*([\s\S]*?)```/i;
+  const match = rawText.match(regex);
+  if (!match) {
+    return { cleanAnswer: rawText, actionPlan: null };
+  }
+
+  const cleanAnswer = rawText.replace(regex, '').trim();
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    if (!parsed || !Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
+      return { cleanAnswer, actionPlan: null };
+    }
+
+    const validProjectIds = new Set(projectsList.map((p) => p.id));
+    const validPersonIds = new Set(peopleList.map((p) => p.id));
+    const rawProj = parsed.project || {};
+
+    const rawMode = String(rawProj.mode || 'none');
+    const existingId =
+      rawMode === 'existing' && validProjectIds.has(String(rawProj.existing_project_id))
+        ? String(rawProj.existing_project_id)
+        : null;
+
+    const mode: 'none' | 'existing' | 'new' =
+      rawMode === 'existing' && existingId
+        ? 'existing'
+        : rawMode === 'new' && String(rawProj.title || '').trim()
+          ? 'new'
+          : 'none';
+
+    const matchedExisting = existingId
+      ? projectsList.find((p) => p.id === existingId)
+      : null;
+
+    const projDept = matchedExisting
+      ? normalizeDepartment(matchedExisting.department)
+      : normalizeDepartment(String(rawProj.department || fallbackDept || 'Board'));
+
+    const projOwnerId = validPersonIds.has(String(rawProj.owner_id))
+      ? String(rawProj.owner_id)
+      : null;
+
+    const tasks: AiProposedTask[] = parsed.tasks.map(
+      (t: Record<string, unknown>, idx: number) => {
+        const assigneeId = validPersonIds.has(String(t.assignee_id))
+          ? String(t.assignee_id)
+          : null;
+        const assigneePerson = assigneeId
+          ? peopleList.find((p) => p.id === assigneeId)
+          : null;
+
+        const rawPrio = String(t.priority || 'medium') as PriorityKey;
+        const priority: PriorityKey = ['low', 'medium', 'high', 'urgent'].includes(rawPrio)
+          ? rawPrio
+          : 'medium';
+
+        return {
+          id: `ai-task-${Date.now()}-${idx}`,
+          selected: true,
+          title: String(t.title || `Task ${idx + 1}`).trim(),
+          description: t.description ? String(t.description).trim() : null,
+          type: t.type === 'milestone' ? 'milestone' : 'task',
+          department: normalizeDepartment(String(t.department || projDept)),
+          assignee_id: assigneeId,
+          assignee_name:
+            assigneePerson?.full_name || (t.assignee_name ? String(t.assignee_name) : null),
+          priority,
+          estimated_hours: Math.max(0.5, Number(t.estimated_hours ?? 2)),
+          start_date: t.start_date ? String(t.start_date).slice(0, 10) : todayIso,
+          deadline: t.deadline ? String(t.deadline).slice(0, 10) : todayIso,
+          is_my_task: Boolean(t.is_my_task),
+          needs_pm_sync: Boolean(t.needs_pm_sync),
+        };
+      }
+    );
+
+    const actionPlan: AiActionPlan = {
+      summary: String(parsed.summary || 'Plan propus spre aprobare'),
+      project: {
+        mode,
+        existing_project_id: existingId,
+        title: matchedExisting
+          ? matchedExisting.title
+          : String(rawProj.title || '').trim(),
+        description: rawProj.description ? String(rawProj.description).trim() : null,
+        department: projDept,
+        owner_id: projOwnerId,
+        owner_name: projOwnerId
+          ? peopleList.find((p) => p.id === projOwnerId)?.full_name || null
+          : null,
+        is_core_team: Boolean(rawProj.is_core_team),
+        needs_pm_sync: Boolean(rawProj.needs_pm_sync),
+        start_date: rawProj.start_date ? String(rawProj.start_date).slice(0, 10) : todayIso,
+        deadline: rawProj.deadline ? String(rawProj.deadline).slice(0, 10) : null,
+      },
+      tasks,
+    };
+
+    return { cleanAnswer, actionPlan };
+  } catch {
+    return { cleanAnswer, actionPlan: null };
+  }
+}
+
 export async function GET() {
   const allTime = await getAllTimeUsage();
   return NextResponse.json({ allTime });
@@ -123,8 +272,8 @@ export async function POST(req: NextRequest) {
     const embeddingTokens = embRes.usage?.total_tokens ?? 0;
     const queryEmbedding = embRes.data[0].embedding;
 
-    // 2. Hybrid search în documente + Notes
-    const [docsRes, notesRes, liveCrmContext] = await Promise.all([
+    // 2. Hybrid search în documente + Notes + Live CRM + IDs pentru propuneri task/proiect
+    const [docsRes, notesRes, liveCrmContext, projectsRes, peopleRes] = await Promise.all([
       supabase.rpc('match_documents', {
         query_embedding: queryEmbedding,
         query_text: question,
@@ -136,6 +285,8 @@ export async function POST(req: NextRequest) {
         match_count: 3,
       }),
       buildLiveCrmContext(department),
+      supabase.from('projects').select('id, title, department, is_core_team'),
+      supabase.from('people').select('id, full_name, role, department'),
     ]);
 
     if (docsRes.error) {
@@ -143,10 +294,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Eroare la căutarea în baza de date.' }, { status: 500 });
     }
 
+    const projectsList = projectsRes.data || [];
+    const peopleList = peopleRes.data || [];
+
     const matched = ((docsRes.data as MatchedChunk[]) || []).filter((c) => c.similarity >= 0.35);
     const matchedNotes = ((notesRes.data as MatchedNote[]) || []).filter((n) => n.similarity >= 0.38);
 
-    // 3. Căutare web (doar cu /web)
+    // 3. Căutare web (STRICT doar cu /web activat)
     let webResults: WebResult[] = [];
     if (usedWeb) {
       webResults = await searchWeb(question);
@@ -202,25 +356,49 @@ export async function POST(req: NextRequest) {
           .join('\n\n')
       : '';
 
-const escalationGuardInstruction =
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const idLookupContext = `\n\n=== ID-URI EXACTE PENTRU PROPUNERI TASK/PROIECT (DATA: ${todayIso}) ===\nPROIECTE:\n${
+      projectsList.length
+        ? projectsList
+            .map((p) => `- id="${p.id}" | title="${p.title}" | dept="${p.department}"`)
+            .join('\n')
+        : '- Niciun proiect.'
+    }\nOAMENI:\n${
+      peopleList.length
+        ? peopleList
+            .map((p) => `- id="${p.id}" | name="${p.full_name}" | role="${p.role}" | dept="${p.department}"`)
+            .join('\n')
+        : '- Nicio persoană.'
+    }`;
+
+    const pmpActionInstruction = `
+# PROPUNERE EXECUTABILĂ DE PROIECTE & TASK-URI (DOAR LA CERERE)
+- DOAR când Petre cere explicit să adaugi, să creezi sau să planifici task-uri / un proiect (ex: „adaugă task-ul...”, „ok facem asta, asta, asta”, „pune în proiect...”, „transformă în task-uri”), adaugă LA FINALUL răspunsului un bloc \`\`\`pmp_plan ... \`\`\` cu JSON valid, pe care Petre îl aprobă cu 1 click.
+- NU genera \`\`\`pmp_plan\`\`\` la întrebări normale, diagrame \`\`\`mermaid\`\`\`, grafice \`\`\`chart\`\`\` sau analize simple.
+- Pentru responsabilul Petre (eu) folosește STRICT UUID-ul lui Cîrceag Petre (Manager/Board), iar pentru Vlad (monitorizare) UUID-ul lui Brinzan Vlad (Monitorizare/Board). Dacă trebuie discutat cu Vlad (PM), pune "needs_pm_sync": true.
+- Format JSON exact în interiorul \`\`\`pmp_plan\`:
+{"summary":"Rezumat scurt","project":{"mode":"none"|"existing"|"new","existing_project_id":null,"title":"","description":null,"department":"Board","owner_id":null,"is_core_team":false,"needs_pm_sync":false,"start_date":"${todayIso}","deadline":null},"tasks":[{"title":"Titlu task","description":null,"type":"task","department":"Board","assignee_id":null,"priority":"medium","estimated_hours":2,"start_date":"${todayIso}","deadline":"${todayIso}","is_my_task":true,"needs_pm_sync":false}]}`;
+
+    const escalationGuardInstruction =
       autoEscalate && modelConfig.effectiveMode === 'rapid'
         ? `\n\n[AUTO-ESCALATION]: Dacă observi ORICE neconcordanță, contradicție, diferență de cifre/termene între documente, date incomplete sau dacă trebuie să sintetizezi roluri/structuri complexe, nu răspunde tu — returnează DOAR cuvântul exact: [ESCALATE]`
         : '';
 
-   const baseMessages = [
-        {
-          role: 'system' as const,
-          content:
-            ALUMNI_PM_SYSTEM_PROMPT +
-            modelConfig.thinkingPromptInjection +
-            escalationGuardInstruction,
-        },
-        ...history.map((m) => ({ role: m.role, content: m.content })),
-        {
-          role: 'user' as const,
-          content: `CONTEXT DOCUMENTE:\n${docContext}${notesContext}${liveCrmContext}${webContext}\n\nÎNTREBARE UTILIZATOR (${usedWeb ? 'CU /web ACTIVAT' : 'FĂRĂ /web'}): ${question}`,
-        },
-      ];
+    const baseMessages = [
+      {
+        role: 'system' as const,
+        content:
+          ALUMNI_PM_SYSTEM_PROMPT +
+          modelConfig.thinkingPromptInjection +
+          pmpActionInstruction +
+          escalationGuardInstruction,
+      },
+      ...history.map((m) => ({ role: m.role, content: m.content })),
+      {
+        role: 'user' as const,
+        content: `CONTEXT DOCUMENTE:\n${docContext}${notesContext}${liveCrmContext}${idLookupContext}${webContext}\n\nÎNTREBARE UTILIZATOR (${usedWeb ? 'CU /web ACTIVAT' : 'FĂRĂ /web'}): ${question}`,
+      },
+    ];
 
     let completion = await azure.chat.completions.create({
       model: modelConfig.deployment,
@@ -248,7 +426,10 @@ const escalationGuardInstruction =
         messages: [
           {
             role: 'system',
-            content: ALUMNI_PM_SYSTEM_PROMPT + modelConfig.thinkingPromptInjection,
+            content:
+              ALUMNI_PM_SYSTEM_PROMPT +
+              modelConfig.thinkingPromptInjection +
+              pmpActionInstruction,
           },
           ...baseMessages.slice(1),
         ],
@@ -257,6 +438,13 @@ const escalationGuardInstruction =
       completionTokens += completion.usage?.completion_tokens ?? 0;
       rawAnswer = stripThinkingBlock(completion.choices[0].message.content || '');
     }
+
+    const { cleanAnswer, actionPlan } = extractAndNormalizeActionPlan(
+      rawAnswer,
+      projectsList,
+      peopleList,
+      department
+    );
 
     const totalTokens = embeddingTokens + promptTokens + completionTokens;
     const estimatedCostUsd =
@@ -277,7 +465,8 @@ const escalationGuardInstruction =
     const allTime = await getAllTimeUsage();
 
     return NextResponse.json({
-      answer: rawAnswer || 'Fără răspuns.',
+      answer: cleanAnswer || 'Fără răspuns.',
+      actionPlan,
       sources: uniqueSources,
       notesUsed: matchedNotes.map((n) => ({
         content: n.content,

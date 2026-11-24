@@ -73,7 +73,6 @@ export function TaskDetailModal({
         body: JSON.stringify({
           action: 'update_task',
           id: task.id,
-          needs_pm_sync: needsPmSync,
           title: title.trim(),
           description: description.trim() || null,
           status,
@@ -86,6 +85,26 @@ export function TaskDetailModal({
           start_date: startDate,
           deadline,
           is_my_task: isMyTask,
+          needs_pm_sync: needsPmSync,
+        }),
+      });
+      await onRefresh();
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handlePromoteToProject() {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await fetch('/api/pmp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'promote_task_to_project',
+          id: task.id,
         }),
       });
       await onRefresh();
@@ -169,7 +188,7 @@ export function TaskDetailModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm">
       <div className="flex h-[88vh] max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-900 shadow-2xl">
         {/* Top Bar */}
-        <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-6 py-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 bg-zinc-950 px-6 py-3.5">
           <div className="flex items-center gap-2 text-xs">
             <span className="rounded bg-zinc-800 px-2.5 py-0.5 font-mono text-[11px] text-zinc-300">
               {task.parent_task_id
@@ -180,6 +199,11 @@ export function TaskDetailModal({
                     : '🟡 MILESTONE'
                   : '⚡ TASK'}
             </span>
+            {!task.project_id && !task.parent_task_id && (
+              <span className="rounded border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-zinc-400">
+                Task Ad-hoc (fără proiect)
+              </span>
+            )}
             {blockerTask && blockerTask.status !== 'done' && (
               <span className="rounded border border-rose-500/40 bg-rose-500/15 px-2.5 py-0.5 text-[11px] text-rose-300">
                 🔒 Blocat de: {blockerTask.title}
@@ -188,6 +212,17 @@ export function TaskDetailModal({
           </div>
 
           <div className="flex items-center gap-2">
+            {!task.project_id && !task.parent_task_id && (
+              <button
+                type="button"
+                disabled={saving}
+                onClick={handlePromoteToProject}
+                className="rounded-lg border border-sky-500/40 bg-sky-500/15 px-3 py-1.5 text-xs font-medium text-sky-300 transition hover:bg-sky-500/25 disabled:opacity-40"
+              >
+                🚀 Promovează la Proiect
+              </button>
+            )}
+
             {task.type === 'milestone' && (
               <button
                 type="button"
@@ -347,7 +382,7 @@ export function TaskDetailModal({
             )}
           </div>
 
-          {/* Coloana Dreaptă: Proprietăți Jira/Asana (Calendarul pus sus ca să nu ceară scroll) */}
+          {/* Coloana Dreaptă: Proprietăți */}
           <div className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-950/80 p-4 text-xs">
             <div>
               <label className="mb-1 block text-[11px] text-zinc-400">
@@ -385,6 +420,7 @@ export function TaskDetailModal({
                 tasks={allTasks}
                 value={assigneeId}
                 onChange={setAssigneeId}
+                onPersonCreated={onRefresh}
               />
             </div>
 
@@ -449,7 +485,7 @@ export function TaskDetailModal({
                 onChange={(e) => setProjectId(e.target.value || null)}
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-2 text-zinc-200"
               >
-                <option value="">Task individual</option>
+                <option value="">Task ad-hoc (fără proiect)</option>
                 {projects.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.title}
@@ -487,6 +523,7 @@ export function TaskDetailModal({
               />
               <span>Apare în „Focusul Meu” (Dashboard)</span>
             </label>
+
             <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-violet-500/25 bg-violet-500/10 px-2.5 py-2 text-violet-200">
               <input
                 type="checkbox"
